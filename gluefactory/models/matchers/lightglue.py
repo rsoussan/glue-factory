@@ -38,16 +38,43 @@ def normalize_keypoints(
     kpts = (kpts - shift[..., None, :]) / scale[..., None, None]
     return kpts
 
+@AMP_CUSTOM_FWD_F32
+def normalize_depths(depths: torch.Tensor) -> torch.Tensor:
+    """
+    Normalize depths (batch, count) to be centered and scaled to [-1, 1].
+
+    Args:
+        depths: Depths tensor with shape (batch, num).
+
+    Returns:
+        Normalized depths tensor (batch, num). 
+    """
+    depth_range = depths.max(dim=1).values - depths.min(dim=1).values  
+    depth_range = depth_range.to(depths)
+    shift = (depths.max(dim=1).values + depths.min(dim=1).values) / 2  
+    shift = shift.to(depths)
+
+    # Add last dimension of 1 so these can be broadcasted when compared to depths 
+    shift = shift.unsqueeze(1)
+    depth_range = depth_range.unsqueeze(1)  
+
+    normalized_depths = (depths - shift) / (depth_range / 2)
+    return normalized_depths
+
+def valid_mask(depth: torch.Tensor) -> torch.BoolTensor:
+    mask_1d = ~torch.isnan(depth)  # (batch, num)
+    mask_2d = mask_1d.unsqueeze(2) & mask_1d.unsqueeze(1)  # (batch, num, num)
+    # Expand mask for num_heads as expected in transformer layer
+    mask_2d = mask_2d.unsqueeze(1)
+    return mask_2d
 
 def rotate_half(x: torch.Tensor) -> torch.Tensor:
     x = x.unflatten(-1, (-1, 2))
     x1, x2 = x.unbind(dim=-1)
     return torch.stack((-x2, x1), dim=-1).flatten(start_dim=-2)
 
-
 def apply_cached_rotary_emb(freqs: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
     return (t * freqs[0]) + (rotate_half(t) * freqs[1])
-
 
 class LearnableFourierPositionalEncoding(nn.Module):
     def __init__(self, M: int, dim: int, F_dim: int = None, gamma: float = 1.0) -> None:
@@ -152,6 +179,7 @@ class SelfBlock(nn.Module):
         x: torch.Tensor,
         encoding: torch.Tensor,
         depth: torch.Tensor,
+        depth_encoding: torch.Tensor,
         mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         qkv = self.Wqkv(x)
@@ -238,23 +266,25 @@ class TransformerLayer(nn.Module):
         encoding1,
         depth0, 
         depth1, 
+        depth_encoding0,
+        depth_encoding1,
         mask0: Optional[torch.Tensor] = None,
         mask1: Optional[torch.Tensor] = None,
     ):
         if mask0 is not None and mask1 is not None:
-            return self.masked_forward(desc0, desc1, encoding0, encoding1, depth0, depth1, mask0, mask1)
+            return self.masked_forward(desc0, desc1, encoding0, encoding1, depth0, depth1, depth_encoding0, depth_encoding1, mask0, mask1)
         else:
-            desc0 = self.self_attn(desc0, encoding0, depth0)
-            desc1 = self.self_attn(desc1, encoding1, depth1)
+            desc0 = self.self_attn(desc0, encoding0, depth0, depth_encoding0)
+            desc1 = self.self_attn(desc1, encoding1, depth1, depth_encoding1)
             return self.cross_attn(desc0, desc1)
 
     # This part is compiled and allows padding inputs
-    def masked_forward(self, desc0, desc1, encoding0, encoding1, depth0, depth1, mask0, mask1):
+    def masked_forward(self, desc0, desc1, encoding0, encoding1, depth0, depth1, depth_encoding0, depth_encoding1, mask0, mask1):
         mask = mask0 & mask1.transpose(-1, -2)
         mask0 = mask0 & mask0.transpose(-1, -2)
         mask1 = mask1 & mask1.transpose(-1, -2)
-        desc0 = self.self_attn(desc0, encoding0, depth0, mask0)
-        desc1 = self.self_attn(desc1, encoding1, depth1, mask1)
+        desc0 = self.self_attn(desc0, encoding0, depth0, depth_encoding0, mask0)
+        desc1 = self.self_attn(desc1, encoding1, depth1, depth_encoding1, mask1)
         return self.cross_attn(desc0, desc1, mask)
 
 
@@ -353,6 +383,10 @@ class LightGlue(nn.Module):
         self.posenc = LearnableFourierPositionalEncoding(
             2 + 2 * conf.add_scale_ori, head_dim, head_dim
         )
+        # Doesn't support adding scale ori
+        self.depthenc = LearnableFourierPositionalEncoding(
+            1, head_dim, head_dim
+        )
 
         h, n, d = conf.num_heads, conf.n_layers, conf.descriptor_dim
 
@@ -418,8 +452,17 @@ class LightGlue(nn.Module):
         for key in self.required_data_keys:
             assert key in data, f"Missing key {key} in data"
         kpts0, kpts1 = data["keypoints0"], data["keypoints1"]
-        #print(data.keys())
+        print(data.keys())
         depth0, depth1 = data["depth_keypoints0"], data["depth_keypoints1"]
+        depth0 = normalize_depths(depth0).clone()
+        depth1 = normalize_depths(depth1).clone()
+        # TODO: test filling training data depths w/ nearest valid neighbors?
+        mask0 = valid_mask(depth0)
+        mask1 = valid_mask(depth1)
+        # Add trailing dimenion of 1 for depth values
+        depth0 = depth0.unsqueeze(-1)
+        depth1 = depth1.unsqueeze(-1)
+
         print("depth0 shape: ")
         print(depth0.shape)
         print("kpts0 shape: ")
@@ -466,6 +509,9 @@ class LightGlue(nn.Module):
         # cache positional embeddings
         encoding0 = self.posenc(kpts0)
         encoding1 = self.posenc(kpts1)
+        # cache depth embeddings
+        depth_encoding0 = self.depthenc(depth0)
+        depth_encoding1 = self.depthenc(depth1)
 
         # GNN + final_proj + assignment
         do_early_stop = self.conf.depth_confidence > 0 and not self.training
@@ -490,10 +536,14 @@ class LightGlue(nn.Module):
                     encoding1,
                     depth0, 
                     depth1,
+                    depth_encoding0, 
+                    depth_encoding1, 
+                    mask0, 
+                    mask1,
                     use_reentrant=False,  # Recommended by torch, default was True
                 )
             else:
-                desc0, desc1 = self.transformers[i](desc0, desc1, encoding0, encoding1, depth0, depth1)
+                desc0, desc1 = self.transformers[i](desc0, desc1, encoding0, encoding1, depth0, depth1, depth_encoding0, depth_encoding1, mask0, mask1)
             if self.training or i == self.conf.n_layers - 1:
                 all_desc0.append(desc0)
                 all_desc1.append(desc1)
@@ -506,6 +556,7 @@ class LightGlue(nn.Module):
                 if self.check_if_stop(token0[..., :m, :], token1[..., :n, :], i, m + n):
                     break
             if do_point_pruning:
+                # TODO: accound for depth values and encodings!! (only needed during testing)
                 assert b == 1
                 scores0 = self.log_assignment[i].get_matchability(desc0)
                 prunemask0 = self.get_pruning_mask(token0, scores0, i)
