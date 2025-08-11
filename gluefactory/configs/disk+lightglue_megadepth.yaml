@@ -29,9 +29,10 @@ model:
         detection_threshold: 0.0
         trainable: False
     ground_truth:
-        name: matchers.homography_matcher
+        name: matchers.depth_matcher
         th_positive: 3
-        th_negative: 3
+        th_negative: 5 
+        th_epi: 5
     matcher:
         name: matchers.lightglue
         filter_threshold: 0.1

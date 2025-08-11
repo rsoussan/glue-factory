@@ -151,6 +151,7 @@ class SelfBlock(nn.Module):
         self,
         x: torch.Tensor,
         encoding: torch.Tensor,
+        depth: torch.Tensor,
         mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         qkv = self.Wqkv(x)
@@ -160,6 +161,8 @@ class SelfBlock(nn.Module):
         k = apply_cached_rotary_emb(encoding, k)
         context = self.inner_attn(q, k, v, mask=mask)
         message = self.out_proj(context.transpose(1, 2).flatten(start_dim=-2))
+        #print(f"NaN percentage: {100.0 * torch.isnan(depth).sum().item() / depth.numel():.2f}%") 
+        # TODO: include depth here!
         return x + self.ffn(torch.cat([x, message], -1))
 
 
@@ -233,23 +236,25 @@ class TransformerLayer(nn.Module):
         desc1,
         encoding0,
         encoding1,
+        depth0, 
+        depth1, 
         mask0: Optional[torch.Tensor] = None,
         mask1: Optional[torch.Tensor] = None,
     ):
         if mask0 is not None and mask1 is not None:
-            return self.masked_forward(desc0, desc1, encoding0, encoding1, mask0, mask1)
+            return self.masked_forward(desc0, desc1, encoding0, encoding1, depth0, depth1, mask0, mask1)
         else:
-            desc0 = self.self_attn(desc0, encoding0)
-            desc1 = self.self_attn(desc1, encoding1)
+            desc0 = self.self_attn(desc0, encoding0, depth0)
+            desc1 = self.self_attn(desc1, encoding1, depth1)
             return self.cross_attn(desc0, desc1)
 
     # This part is compiled and allows padding inputs
-    def masked_forward(self, desc0, desc1, encoding0, encoding1, mask0, mask1):
+    def masked_forward(self, desc0, desc1, encoding0, encoding1, depth0, depth1, mask0, mask1):
         mask = mask0 & mask1.transpose(-1, -2)
         mask0 = mask0 & mask0.transpose(-1, -2)
         mask1 = mask1 & mask1.transpose(-1, -2)
-        desc0 = self.self_attn(desc0, encoding0, mask0)
-        desc1 = self.self_attn(desc1, encoding1, mask1)
+        desc0 = self.self_attn(desc0, encoding0, depth0, mask0)
+        desc1 = self.self_attn(desc1, encoding1, depth1, mask1)
         return self.cross_attn(desc0, desc1, mask)
 
 
@@ -412,8 +417,13 @@ class LightGlue(nn.Module):
     def forward(self, data: dict) -> dict:
         for key in self.required_data_keys:
             assert key in data, f"Missing key {key} in data"
-
         kpts0, kpts1 = data["keypoints0"], data["keypoints1"]
+        #print(data.keys())
+        depth0, depth1 = data["depth_keypoints0"], data["depth_keypoints1"]
+        print("depth0 shape: ")
+        print(depth0.shape)
+        print("kpts0 shape: ")
+        print(kpts0.shape)
         b, m, _ = kpts0.shape
         b, n, _ = kpts1.shape
         device = kpts0.device
@@ -478,10 +488,12 @@ class LightGlue(nn.Module):
                     desc1,
                     encoding0,
                     encoding1,
+                    depth0, 
+                    depth1,
                     use_reentrant=False,  # Recommended by torch, default was True
                 )
             else:
-                desc0, desc1 = self.transformers[i](desc0, desc1, encoding0, encoding1)
+                desc0, desc1 = self.transformers[i](desc0, desc1, encoding0, encoding1, depth0, depth1)
             if self.training or i == self.conf.n_layers - 1:
                 all_desc0.append(desc0)
                 all_desc1.append(desc1)
@@ -576,6 +588,7 @@ class LightGlue(nn.Module):
             return self.pruning_keypoint_thresholds[device.type]
 
     def loss(self, pred, data):
+        print(f"Pre Loss: {torch.cuda.memory_allocated() / 1024**3:.2f} GB")
         def loss_params(pred, i):
             la, _ = self.log_assignment[i](
                 pred["ref_descriptors0"][:, i], pred["ref_descriptors1"][:, i]
@@ -592,6 +605,7 @@ class LightGlue(nn.Module):
         if self.training:
             losses["confidence"] = 0.0
 
+        print(f"Loss Computed nll: {torch.cuda.memory_allocated() / 1024**3:.2f} GB")
         # B = pred['log_assignment'].shape[0]
         losses["row_norm"] = pred["log_assignment"].exp()[:, :-1].sum(2).mean(1)
         for i in range(N - 1):
@@ -613,8 +627,10 @@ class LightGlue(nn.Module):
             ) / (N - 1)
 
             del params_i
+            print(f"Loss It i: {i} {torch.cuda.memory_allocated() / 1024**3:.2f} GB")
         losses["total"] /= sum_weights
 
+        print(f"Loss Post iterative nll: {torch.cuda.memory_allocated() / 1024**3:.2f} GB")
         # confidences
         if self.training:
             losses["total"] = losses["total"] + losses["confidence"]
@@ -624,6 +640,8 @@ class LightGlue(nn.Module):
             metrics = matcher_metrics(pred, data)
         else:
             metrics = {}
+
+        print(f"Loss Post confidences, Done: {torch.cuda.memory_allocated() / 1024**3:.2f} GB")
         return losses, metrics
 
 

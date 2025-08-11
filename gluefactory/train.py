@@ -464,7 +464,8 @@ def training(rank, conf, output_dir, args):
 
             model.train()
             optimizer.zero_grad()
-
+            print(f"Start: {torch.cuda.memory_allocated() / 1024**3:.2f} GB")
+            print(f"Reserved:  {torch.cuda.memory_reserved() / 1024**3:.2f} GB")
             with torch.autocast(
                 device_type="cuda" if torch.cuda.is_available() else "cpu",
                 enabled=args.mixed_precision is not None,
@@ -472,6 +473,11 @@ def training(rank, conf, output_dir, args):
             ):
                 data = batch_to_device(data, device, non_blocking=True)
                 pred = model(data)
+                print(f"After pred: {torch.cuda.memory_allocated() / 1024**3:.2f} GB")
+                print(f"Reserved:  {torch.cuda.memory_reserved() / 1024**3:.2f} GB")
+                losses, _ = loss_fn(pred, data)
+                print(f"After loss: {torch.cuda.memory_allocated() / 1024**3:.2f} GB")
+                print(f"Reserved:  {torch.cuda.memory_reserved() / 1024**3:.2f} GB")
                 losses, _ = loss_fn(pred, data)
                 loss = torch.mean(losses["total"])
             if torch.isnan(loss).any():
@@ -488,6 +494,8 @@ def training(rank, conf, output_dir, args):
                 do_backward = do_backward > 0
             if do_backward:
                 scaler.scale(loss).backward()
+                print(f"After backward: {torch.cuda.memory_allocated() / 1024**3:.2f} GB")
+                print(f"Reserved:  {torch.cuda.memory_reserved() / 1024**3:.2f} GB")
                 if args.detect_anomaly:
                     # Check for params without any gradient which causes
                     # problems in distributed training with checkpointing
@@ -507,11 +515,15 @@ def training(rank, conf, output_dir, args):
                             error_if_nonfinite=True,
                         )
                         scaler.step(optimizer)
+                        print(f"After Optimizer: {torch.cuda.memory_allocated() / 1024**3:.2f} GB")
+                        print(f"Reserved:  {torch.cuda.memory_reserved() / 1024**3:.2f} GB")
                     except RuntimeError:
                         logger.warning("NaN detected in gradients. Skipping iteration.")
                     scaler.update()
                 else:
                     scaler.step(optimizer)
+                    print(f"After Optimizer: {torch.cuda.memory_allocated() / 1024**3:.2f} GB")
+                    print(f"Reserved:  {torch.cuda.memory_reserved() / 1024**3:.2f} GB")
                     scaler.update()
                 if not conf.train.lr_schedule.on_epoch:
                     lr_scheduler.step()

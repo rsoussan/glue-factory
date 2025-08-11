@@ -3,6 +3,7 @@ import torch
 
 from .utils import get_image_coords
 from .wrappers import Camera, Pose
+from typing import Tuple
 
 
 def sample_fmap(pts, fmap):
@@ -96,7 +97,7 @@ def symmetric_reprojection_error(
     T_0to1: Pose,
     depth0: torch.Tensor,
     depth1: torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor]:
+) -> Tuple[torch.Tensor, torch.Tensor]:
     T_1to0 = T_0to1.inv()
     d0, valid0 = sample_depth(pts0, depth0)
     d1, valid1 = sample_depth(pts1, depth1)
