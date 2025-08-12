@@ -167,6 +167,7 @@ class SelfBlock(nn.Module):
         self.Wqkv = nn.Linear(embed_dim, 3 * embed_dim, bias=bias)
         self.inner_attn = Attention(flash)
         self.out_proj = nn.Linear(embed_dim, embed_dim, bias=bias)
+        self.depth_out_proj = nn.Linear(embed_dim, embed_dim, bias=bias)
         self.ffn = nn.Sequential(
             nn.Linear(2 * embed_dim, 2 * embed_dim),
             nn.LayerNorm(2 * embed_dim, elementwise_affine=True),
@@ -178,7 +179,6 @@ class SelfBlock(nn.Module):
         self,
         x: torch.Tensor,
         encoding: torch.Tensor,
-        depth: torch.Tensor,
         depth_encoding: torch.Tensor,
         mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
@@ -189,6 +189,16 @@ class SelfBlock(nn.Module):
         k = apply_cached_rotary_emb(encoding, k)
         context = self.inner_attn(q, k, v, mask=mask)
         message = self.out_proj(context.transpose(1, 2).flatten(start_dim=-2))
+
+        # Add depth information
+        # TODO: generate different qkv for depth? (prob not, not done in lfm3d..)
+        depth_q = apply_cached_rotary_emb(depth_encoding, q)
+        depth_k = apply_cached_rotary_emb(depth_encoding, k)
+        depth_context = self.inner_attn(depth_q, depth_k, v, mask=mask)
+        depth_message = self.depth_out_proj(context.transpose(1, 2).flatten(start_dim=-2))
+        # TODO: use a network to fuse this? don't use depth_out_proj? pros and cons?
+        message += depth_message
+ 
         #print(f"NaN percentage: {100.0 * torch.isnan(depth).sum().item() / depth.numel():.2f}%") 
         # TODO: include depth here!
         return x + self.ffn(torch.cat([x, message], -1))
@@ -264,27 +274,25 @@ class TransformerLayer(nn.Module):
         desc1,
         encoding0,
         encoding1,
-        depth0, 
-        depth1, 
         depth_encoding0,
         depth_encoding1,
         mask0: Optional[torch.Tensor] = None,
         mask1: Optional[torch.Tensor] = None,
     ):
         if mask0 is not None and mask1 is not None:
-            return self.masked_forward(desc0, desc1, encoding0, encoding1, depth0, depth1, depth_encoding0, depth_encoding1, mask0, mask1)
+            return self.masked_forward(desc0, desc1, encoding0, encoding1, depth_encoding0, depth_encoding1, mask0, mask1)
         else:
-            desc0 = self.self_attn(desc0, encoding0, depth0, depth_encoding0)
-            desc1 = self.self_attn(desc1, encoding1, depth1, depth_encoding1)
+            desc0 = self.self_attn(desc0, encoding0, depth_encoding0)
+            desc1 = self.self_attn(desc1, encoding1, depth_encoding1)
             return self.cross_attn(desc0, desc1)
 
     # This part is compiled and allows padding inputs
-    def masked_forward(self, desc0, desc1, encoding0, encoding1, depth0, depth1, depth_encoding0, depth_encoding1, mask0, mask1):
+    def masked_forward(self, desc0, desc1, encoding0, encoding1, depth_encoding0, depth_encoding1, mask0, mask1):
         mask = mask0 & mask1.transpose(-1, -2)
         mask0 = mask0 & mask0.transpose(-1, -2)
         mask1 = mask1 & mask1.transpose(-1, -2)
-        desc0 = self.self_attn(desc0, encoding0, depth0, depth_encoding0, mask0)
-        desc1 = self.self_attn(desc1, encoding1, depth1, depth_encoding1, mask1)
+        desc0 = self.self_attn(desc0, encoding0, depth_encoding0, mask0)
+        desc1 = self.self_attn(desc1, encoding1, depth_encoding1, mask1)
         return self.cross_attn(desc0, desc1, mask)
 
 
@@ -452,7 +460,6 @@ class LightGlue(nn.Module):
         for key in self.required_data_keys:
             assert key in data, f"Missing key {key} in data"
         kpts0, kpts1 = data["keypoints0"], data["keypoints1"]
-        print(data.keys())
         depth0, depth1 = data["depth_keypoints0"], data["depth_keypoints1"]
         depth0 = normalize_depths(depth0).clone()
         depth1 = normalize_depths(depth1).clone()
@@ -463,10 +470,6 @@ class LightGlue(nn.Module):
         depth0 = depth0.unsqueeze(-1)
         depth1 = depth1.unsqueeze(-1)
 
-        print("depth0 shape: ")
-        print(depth0.shape)
-        print("kpts0 shape: ")
-        print(kpts0.shape)
         b, m, _ = kpts0.shape
         b, n, _ = kpts1.shape
         device = kpts0.device
@@ -534,8 +537,6 @@ class LightGlue(nn.Module):
                     desc1,
                     encoding0,
                     encoding1,
-                    depth0, 
-                    depth1,
                     depth_encoding0, 
                     depth_encoding1, 
                     mask0, 
@@ -543,7 +544,7 @@ class LightGlue(nn.Module):
                     use_reentrant=False,  # Recommended by torch, default was True
                 )
             else:
-                desc0, desc1 = self.transformers[i](desc0, desc1, encoding0, encoding1, depth0, depth1, depth_encoding0, depth_encoding1, mask0, mask1)
+                desc0, desc1 = self.transformers[i](desc0, desc1, encoding0, encoding1, depth_encoding0, depth_encoding1, mask0, mask1)
             if self.training or i == self.conf.n_layers - 1:
                 all_desc0.append(desc0)
                 all_desc1.append(desc1)
