@@ -16,6 +16,9 @@ FLASH_AVAILABLE = hasattr(F, "scaled_dot_product_attention")
 
 torch.backends.cudnn.deterministic = True
 
+iteration = 0
+
+
 # Hacky workaround for torch.amp.custom_fwd to support older versions of PyTorch.
 AMP_CUSTOM_FWD_F32 = (
     torch.amp.custom_fwd(cast_inputs=torch.float32, device_type="cuda")
@@ -66,6 +69,8 @@ def valid_mask(depth: torch.Tensor) -> torch.BoolTensor:
     mask_2d = mask_1d.unsqueeze(2) & mask_1d.unsqueeze(1)  # (batch, num, num)
     # Expand mask for num_heads as expected in transformer layer
     mask_2d = mask_2d.unsqueeze(1)
+    print("Fully masked rows detected!" if (~torch.isfinite(mask_2d)).all(dim=-1).any() else "All mask rows OK")
+    if (~mask_2d).all(dim=-1).any(): print("Valid mask: Some rows are fully masked")
     return mask_2d
 
 def rotate_half(x: torch.Tensor) -> torch.Tensor:
@@ -136,24 +141,55 @@ class Attention(nn.Module):
             torch.backends.cuda.enable_flash_sdp(allow_flash)
 
     def forward(self, q, k, v, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
-        if self.enable_flash and q.device.type == "cuda":
+        if False and self.enable_flash and q.device.type == "cuda":
             # use torch 2.0 scaled_dot_product_attention with flash
             if FLASH_AVAILABLE:
+                print("using flash!")
                 args = [x.half().contiguous() for x in [q, k, v]]
                 v = F.scaled_dot_product_attention(*args, attn_mask=mask).to(q.dtype)
                 return v if mask is None else v.nan_to_num()
-        elif FLASH_AVAILABLE:
+        elif False and FLASH_AVAILABLE:
+            print("using second flash!")
             args = [x.contiguous() for x in [q, k, v]]
+            print("self block scaled dot mask: NaN or Inf detected!" if not torch.isfinite(mask).all() else "All good")
             v = F.scaled_dot_product_attention(*args, attn_mask=mask)
             return v if mask is None else v.nan_to_num()
         else:
+#            s = q.shape[-1] ** -0.5
+#            sim = torch.einsum("...id,...jd->...ij", q, k) * s
+#            if mask is not None:
+#                sim.masked_fill(~mask, -float("inf"))
+#                print("applying attention mask!")
+#                #debug_attention_mask(sim, mask)
+#            print("sim post: NaN or Inf detected!" if not torch.isfinite(sim).all() else "All good")
+#            attn = F.softmax(sim, -1)
+#            print("attn: NaN or Inf detected!" if not torch.isfinite(attn).all() else "All good")
+#            return torch.einsum("...ij,...jd->...id", attn, v)
+            """
+            Scaled dot-product attention that safely handles fully masked rows.
+            q, k, v: (..., num_queries, dim) / (..., num_keys, dim)
+            mask: (..., num_queries, num_keys), True=keep, False=ignore
+            """
             s = q.shape[-1] ** -0.5
             sim = torch.einsum("...id,...jd->...ij", q, k) * s
-            if mask is not None:
-                sim.masked_fill(~mask, -float("inf"))
-            attn = F.softmax(sim, -1)
-            return torch.einsum("...ij,...jd->...id", attn, v)
 
+            if mask is not None:
+                # Detect fully masked query rows
+                fully_masked = (~mask).all(dim=-1, keepdim=True)  # shape: (..., num_queries, 1)
+
+                # Fill temporarily so softmax doesn't see all -inf
+                safe_mask = mask.clone()
+                safe_mask[fully_masked.expand_as(mask)] = True
+                sim = sim.masked_fill(~safe_mask, -float("inf"))
+
+            attn = F.softmax(sim, dim=-1)
+
+            # Zero out attention for fully masked queries
+            if mask is not None:
+                attn[fully_masked.expand_as(attn)] = 0.0
+
+            out = torch.einsum("...ij,...jd->...id", attn, v)
+            return out
 
 class SelfBlock(nn.Module):
     def __init__(
@@ -187,21 +223,64 @@ class SelfBlock(nn.Module):
         q, k, v = qkv[..., 0], qkv[..., 1], qkv[..., 2]
         q = apply_cached_rotary_emb(encoding, q)
         k = apply_cached_rotary_emb(encoding, k)
+        print("self attn!")
+        if (mask is None):
+            print("no mask!")
+        else:
+            print("has mask!")
         context = self.inner_attn(q, k, v, mask=mask)
         message = self.out_proj(context.transpose(1, 2).flatten(start_dim=-2))
 
         # Add depth information
         # TODO: generate different qkv for depth? (prob not, not done in lfm3d..)
-        depth_q = apply_cached_rotary_emb(depth_encoding, q)
-        depth_k = apply_cached_rotary_emb(depth_encoding, k)
-        depth_context = self.inner_attn(depth_q, depth_k, v, mask=mask)
-        depth_message = self.depth_out_proj(context.transpose(1, 2).flatten(start_dim=-2))
-        # TODO: use a network to fuse this? don't use depth_out_proj? pros and cons?
-        message += depth_message
+      #  depth_q = apply_cached_rotary_emb(depth_encoding, q)
+      #  depth_k = apply_cached_rotary_emb(depth_encoding, k)
+      #  depth_context = self.inner_attn(depth_q, depth_k, v, mask=mask)
+      #  depth_message = self.depth_out_proj(context.transpose(1, 2).flatten(start_dim=-2))
+      #  # TODO: use a network to fuse this? don't use depth_out_proj? pros and cons?
+      #  message += depth_message
  
         #print(f"NaN percentage: {100.0 * torch.isnan(depth).sum().item() / depth.numel():.2f}%") 
         # TODO: include depth here!
         return x + self.ffn(torch.cat([x, message], -1))
+
+def debug_attention_mask(sim: torch.Tensor, mask: torch.Tensor = None):
+    """
+    Debug function to check for mask issues in attention computation.
+    sim: (B, H, I, J)
+    mask: can be (B, H, I, J), (B, 1, I, J), or (B, I, J) -- will be broadcasted
+    """
+    print(f"sim.shape: {sim.shape}")
+    if mask is None:
+        print("No mask provided.")
+        return
+
+    print(f"mask.shape: {mask.shape}")
+
+    # Try broadcasting mask to sim
+    try:
+        broadcasted_mask = mask.expand_as(sim)
+    except RuntimeError as e:
+        print("Mask cannot broadcast to sim! Error:", e)
+        return
+
+    # Check fully masked rows after broadcasting
+    fully_masked_rows = (~broadcasted_mask).all(dim=-1)  # shape: (B, H, I)
+    if fully_masked_rows.any():
+        indices = fully_masked_rows.nonzero(as_tuple=False)  # gives (B, H, I) indices
+        print("Warning: some rows are fully masked after broadcasting! These will produce NaNs in softmax.")
+        print("Indices of affected rows (batch, head, query):", indices)
+    else:
+        print("No fully masked rows after broadcasting.")
+
+    # Check for NaNs or Infs in sim
+    if not torch.isfinite(sim).all():
+        nan_inf_indices = (~torch.isfinite(sim)).nonzero(as_tuple=False)
+        print("NaN or Inf detected in sim at indices (batch, head, query, key):", nan_inf_indices)
+    else:
+        print("No NaNs or Infs detected in sim.")
+
+
 
 
 class CrossBlock(nn.Module):
@@ -233,6 +312,12 @@ class CrossBlock(nn.Module):
     def forward(
         self, x0: torch.Tensor, x1: torch.Tensor, mask: Optional[torch.Tensor] = None
     ) -> List[torch.Tensor]:
+        global iteration
+        print(f"fiteration: {iteration}")
+        iteration += 1
+        print(f"scale: {self.scale}")
+        print("x0: NaN or Inf detected!" if not torch.isfinite(x0).all() else "All good")
+        print("x1: NaN or Inf detected!" if not torch.isfinite(x1).all() else "All good")
         qk0, qk1 = self.map_(self.to_qk, x0, x1)
         v0, v1 = self.map_(self.to_v, x0, x1)
         qk0, qk1, v0, v1 = map(
@@ -245,12 +330,48 @@ class CrossBlock(nn.Module):
                 qk1, qk0, v0, mask.transpose(-1, -2) if mask is not None else None
             )
         else:
+
+            print("v0: NaN or Inf detected!" if not torch.isfinite(v0).all() else "All good")
+            print("v1: NaN or Inf detected!" if not torch.isfinite(v1).all() else "All good")
             qk0, qk1 = qk0 * self.scale**0.5, qk1 * self.scale**0.5
             sim = torch.einsum("bhid, bhjd -> bhij", qk0, qk1)
+            print("sim pre: NaN or Inf detected!" if not torch.isfinite(sim).all() else "All good")
+#            if mask is not None:
+#                sim = sim.masked_fill(~mask, -float("inf"))
+#                print("Sim Fully masked rows detected!" if (~torch.isfinite(sim)).all(dim=-1).any() else "Sim All mask rows OK")
+#                print("Mask Fully masked rows detected!" if (~torch.isfinite(mask)).all(dim=-1).any() else "Mask All mask rows OK")
+#                #debug_attention_mask(sim, mask)
+#            print("sim post: NaN or Inf detected!" if not torch.isfinite(sim).all() else "All good")
+#            attn01 = F.softmax(sim, dim=-1)
+#            attn10 = F.softmax(sim.transpose(-2, -1).contiguous(), dim=-1)
+#            print("attn01: NaN or Inf detected!" if not torch.isfinite(attn01).all() else "All good")
+#            print("attn10: NaN or Inf detected!" if not torch.isfinite(attn10).all() else "All good")
+#            if mask is not None:
+#                print("masking attn values! avoiding nans!")
+#                attn01, attn10 = attn01.nan_to_num(), attn10.nan_to_num()
+#            print("2attn01: NaN or Inf detected!" if not torch.isfinite(attn01).all() else "All good")
+#            print("2attn10: NaN or Inf detected!" if not torch.isfinite(attn10).all() else "All good")
             if mask is not None:
-                sim = sim.masked_fill(~mask, -float("inf"))
+                # Detect fully masked rows
+                all_masked = (~mask).all(dim=-1, keepdim=True)  # shape: [B, H, M, 1]
+
+                # Fully masked rows -> 0.0, partially masked -> -inf
+                sim = sim.masked_fill(all_masked, 0.0)
+                sim = sim.masked_fill(~mask & ~all_masked, -float("inf"))
+
+            # Compute attention
             attn01 = F.softmax(sim, dim=-1)
             attn10 = F.softmax(sim.transpose(-2, -1).contiguous(), dim=-1)
+
+            if mask is not None:
+                # Zero out rows in attention that were fully masked
+                all_masked_attn01 = all_masked.expand_as(attn01)
+                all_masked_attn10 = all_masked.transpose(-2, -1).expand_as(attn10)
+                attn01 = attn01.masked_fill(all_masked_attn01, 0.0)
+                attn10 = attn10.masked_fill(all_masked_attn10, 0.0)
+ 
+            qk0, qk1 = qk0 * self.scale**0.5, qk1 * self.scale**0.5
+            qk0, qk1 = qk0 * self.scale**0.5, qk1 * self.scale**0.5
             m0 = torch.einsum("bhij, bhjd -> bhid", attn01, v1)
             m1 = torch.einsum("bhji, bhjd -> bhid", attn10.transpose(-2, -1), v0)
             if mask is not None:
@@ -291,6 +412,7 @@ class TransformerLayer(nn.Module):
         mask = mask0 & mask1.transpose(-1, -2)
         mask0 = mask0 & mask0.transpose(-1, -2)
         mask1 = mask1 & mask1.transpose(-1, -2)
+        print("masked forward!")
         desc0 = self.self_attn(desc0, encoding0, depth_encoding0, mask0)
         desc1 = self.self_attn(desc1, encoding1, depth_encoding1, mask1)
         return self.cross_attn(desc0, desc1, mask)
@@ -303,7 +425,9 @@ def sigmoid_log_double_softmax(
     b, m, n = sim.shape
     certainties = F.logsigmoid(z0) + F.logsigmoid(z1).transpose(1, 2)
     scores0 = F.log_softmax(sim, 2)
+    print("scores0: NaN or Inf detected!" if not torch.isfinite(scores0).all() else "All good")
     scores1 = F.log_softmax(sim.transpose(-1, -2).contiguous(), 2).transpose(-1, -2)
+    print("scores1: NaN or Inf detected!" if not torch.isfinite(scores1).all() else "All good")
     scores = sim.new_full((b, m + 1, n + 1), 0)
     scores[:, :m, :n] = scores0 + scores1 + certainties
     scores[:, :-1, -1] = F.logsigmoid(-z0.squeeze(-1))
@@ -640,7 +764,7 @@ class LightGlue(nn.Module):
             return self.pruning_keypoint_thresholds[device.type]
 
     def loss(self, pred, data):
-        print(f"Pre Loss: {torch.cuda.memory_allocated() / 1024**3:.2f} GB")
+        #print(f"Pre Loss: {torch.cuda.memory_allocated() / 1024**3:.2f} GB")
         def loss_params(pred, i):
             la, _ = self.log_assignment[i](
                 pred["ref_descriptors0"][:, i], pred["ref_descriptors1"][:, i]
@@ -657,7 +781,7 @@ class LightGlue(nn.Module):
         if self.training:
             losses["confidence"] = 0.0
 
-        print(f"Loss Computed nll: {torch.cuda.memory_allocated() / 1024**3:.2f} GB")
+        #print(f"Loss Computed nll: {torch.cuda.memory_allocated() / 1024**3:.2f} GB")
         # B = pred['log_assignment'].shape[0]
         losses["row_norm"] = pred["log_assignment"].exp()[:, :-1].sum(2).mean(1)
         for i in range(N - 1):
@@ -679,10 +803,10 @@ class LightGlue(nn.Module):
             ) / (N - 1)
 
             del params_i
-            print(f"Loss It i: {i} {torch.cuda.memory_allocated() / 1024**3:.2f} GB")
+            #print(f"Loss It i: {i} {torch.cuda.memory_allocated() / 1024**3:.2f} GB")
         losses["total"] /= sum_weights
 
-        print(f"Loss Post iterative nll: {torch.cuda.memory_allocated() / 1024**3:.2f} GB")
+        #print(f"Loss Post iterative nll: {torch.cuda.memory_allocated() / 1024**3:.2f} GB")
         # confidences
         if self.training:
             losses["total"] = losses["total"] + losses["confidence"]
@@ -693,7 +817,7 @@ class LightGlue(nn.Module):
         else:
             metrics = {}
 
-        print(f"Loss Post confidences, Done: {torch.cuda.memory_allocated() / 1024**3:.2f} GB")
+        #print(f"Loss Post confidences, Done: {torch.cuda.memory_allocated() / 1024**3:.2f} GB")
         return losses, metrics
 
 

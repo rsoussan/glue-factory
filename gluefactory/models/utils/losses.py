@@ -2,6 +2,33 @@ import torch
 import torch.nn as nn
 from omegaconf import OmegaConf
 
+def debug_log_assignment(log_assignment, data):
+    print("debugging log assignment!")
+    """
+    For each row in log_assignment with NaN, print:
+      - whether the GT match is valid,
+      - if valid, whether it's a positive or negative match.
+    """
+    B, M1, N1 = log_assignment.shape
+    M, N = M1 - 1, N1 - 1  # last row/column reserved for unmatched
+
+    for b in range(B):
+        for i in range(M):
+            row = log_assignment[b, i, :N]
+            if torch.isnan(row).any():
+                gt = data["gt_matches0"][b, i].item()
+                if gt < 0:
+                    print(f"Batch {b}, keypoint {i}: GT invalid/unmatched (value {gt})")
+                else:
+                    # Positive if row matches GT
+                    is_positive = (row[gt] == row[gt]).item()  # row[gt] is not NaN
+                    match_type = "positive" if is_positive else "negative"
+                    print(
+                        f"Batch {b}, keypoint {i}: GT valid (value {gt}), "
+                        f"{match_type} match, log_assignment contains NaN"
+                    )
+
+
 
 def weight_loss(log_assignment, weights, gamma=0.0):
     b, m, n = log_assignment.shape
@@ -38,6 +65,7 @@ class NLLLoss(nn.Module):
 
     def forward(self, pred, data, weights=None):
         log_assignment = pred["log_assignment"]
+        debug_log_assignment(log_assignment, data)
         if weights is None:
             weights = self.loss_fn(log_assignment, data)
         nll_pos, nll_neg, num_pos, num_neg = weight_loss(
