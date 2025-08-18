@@ -69,8 +69,8 @@ def valid_mask(depth: torch.Tensor) -> torch.BoolTensor:
     mask_2d = mask_1d.unsqueeze(2) & mask_1d.unsqueeze(1)  # (batch, num, num)
     # Expand mask for num_heads as expected in transformer layer
     mask_2d = mask_2d.unsqueeze(1)
-    print("Fully masked rows detected!" if (~torch.isfinite(mask_2d)).all(dim=-1).any() else "All mask rows OK")
-    if (~mask_2d).all(dim=-1).any(): print("Valid mask: Some rows are fully masked")
+    #print("Fully masked rows detected!" if (~torch.isfinite(mask_2d)).all(dim=-1).any() else "All mask rows OK")
+    #if (~mask_2d).all(dim=-1).any(): print("Valid mask: Some rows are fully masked")
     return mask_2d
 
 def rotate_half(x: torch.Tensor) -> torch.Tensor:
@@ -144,14 +144,14 @@ class Attention(nn.Module):
         if False and self.enable_flash and q.device.type == "cuda":
             # use torch 2.0 scaled_dot_product_attention with flash
             if FLASH_AVAILABLE:
-                print("using flash!")
+                #print("using flash!")
                 args = [x.half().contiguous() for x in [q, k, v]]
                 v = F.scaled_dot_product_attention(*args, attn_mask=mask).to(q.dtype)
                 return v if mask is None else v.nan_to_num()
         elif False and FLASH_AVAILABLE:
-            print("using second flash!")
+            #print("using second flash!")
             args = [x.contiguous() for x in [q, k, v]]
-            print("self block scaled dot mask: NaN or Inf detected!" if not torch.isfinite(mask).all() else "All good")
+            #print("self block scaled dot mask: NaN or Inf detected!" if not torch.isfinite(mask).all() else "All good")
             v = F.scaled_dot_product_attention(*args, attn_mask=mask)
             return v if mask is None else v.nan_to_num()
         else:
@@ -223,11 +223,11 @@ class SelfBlock(nn.Module):
         q, k, v = qkv[..., 0], qkv[..., 1], qkv[..., 2]
         q = apply_cached_rotary_emb(encoding, q)
         k = apply_cached_rotary_emb(encoding, k)
-        print("self attn!")
-        if (mask is None):
-            print("no mask!")
-        else:
-            print("has mask!")
+        #print("self attn!")
+        #if (mask is None):
+        #    print("no mask!")
+        #else:
+        #    print("has mask!")
         context = self.inner_attn(q, k, v, mask=mask)
         message = self.out_proj(context.transpose(1, 2).flatten(start_dim=-2))
 
@@ -313,11 +313,11 @@ class CrossBlock(nn.Module):
         self, x0: torch.Tensor, x1: torch.Tensor, mask: Optional[torch.Tensor] = None
     ) -> List[torch.Tensor]:
         global iteration
-        print(f"fiteration: {iteration}")
+        #print(f"fiteration: {iteration}")
         iteration += 1
-        print(f"scale: {self.scale}")
-        print("x0: NaN or Inf detected!" if not torch.isfinite(x0).all() else "All good")
-        print("x1: NaN or Inf detected!" if not torch.isfinite(x1).all() else "All good")
+        #print(f"scale: {self.scale}")
+        #print("x0: NaN or Inf detected!" if not torch.isfinite(x0).all() else "All good")
+        #print("x1: NaN or Inf detected!" if not torch.isfinite(x1).all() else "All good")
         qk0, qk1 = self.map_(self.to_qk, x0, x1)
         v0, v1 = self.map_(self.to_v, x0, x1)
         qk0, qk1, v0, v1 = map(
@@ -331,11 +331,11 @@ class CrossBlock(nn.Module):
             )
         else:
 
-            print("v0: NaN or Inf detected!" if not torch.isfinite(v0).all() else "All good")
-            print("v1: NaN or Inf detected!" if not torch.isfinite(v1).all() else "All good")
+            #print("v0: NaN or Inf detected!" if not torch.isfinite(v0).all() else "All good")
+            #print("v1: NaN or Inf detected!" if not torch.isfinite(v1).all() else "All good")
             qk0, qk1 = qk0 * self.scale**0.5, qk1 * self.scale**0.5
             sim = torch.einsum("bhid, bhjd -> bhij", qk0, qk1)
-            print("sim pre: NaN or Inf detected!" if not torch.isfinite(sim).all() else "All good")
+            #print("sim pre: NaN or Inf detected!" if not torch.isfinite(sim).all() else "All good")
 #            if mask is not None:
 #                sim = sim.masked_fill(~mask, -float("inf"))
 #                print("Sim Fully masked rows detected!" if (~torch.isfinite(sim)).all(dim=-1).any() else "Sim All mask rows OK")
@@ -412,7 +412,7 @@ class TransformerLayer(nn.Module):
         mask = mask0 & mask1.transpose(-1, -2)
         mask0 = mask0 & mask0.transpose(-1, -2)
         mask1 = mask1 & mask1.transpose(-1, -2)
-        print("masked forward!")
+        #print("masked forward!")
         desc0 = self.self_attn(desc0, encoding0, depth_encoding0, mask0)
         desc1 = self.self_attn(desc1, encoding1, depth_encoding1, mask1)
         return self.cross_attn(desc0, desc1, mask)
@@ -425,9 +425,9 @@ def sigmoid_log_double_softmax(
     b, m, n = sim.shape
     certainties = F.logsigmoid(z0) + F.logsigmoid(z1).transpose(1, 2)
     scores0 = F.log_softmax(sim, 2)
-    print("scores0: NaN or Inf detected!" if not torch.isfinite(scores0).all() else "All good")
+    #print("scores0: NaN or Inf detected!" if not torch.isfinite(scores0).all() else "All good")
     scores1 = F.log_softmax(sim.transpose(-1, -2).contiguous(), 2).transpose(-1, -2)
-    print("scores1: NaN or Inf detected!" if not torch.isfinite(scores1).all() else "All good")
+    #print("scores1: NaN or Inf detected!" if not torch.isfinite(scores1).all() else "All good")
     scores = sim.new_full((b, m + 1, n + 1), 0)
     scores[:, :m, :n] = scores0 + scores1 + certainties
     scores[:, :-1, -1] = F.logsigmoid(-z0.squeeze(-1))
