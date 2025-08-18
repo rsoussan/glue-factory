@@ -65,7 +65,7 @@ class NLLLoss(nn.Module):
 
     def forward(self, pred, data, weights=None):
         log_assignment = pred["log_assignment"]
-        debug_log_assignment(log_assignment, data)
+        #debug_log_assignment(log_assignment, data)
         if weights is None:
             weights = self.loss_fn(log_assignment, data)
         nll_pos, nll_neg, num_pos, num_neg = weight_loss(
