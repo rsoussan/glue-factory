@@ -233,12 +233,12 @@ class SelfBlock(nn.Module):
 
         # Add depth information
         # TODO: generate different qkv for depth? (prob not, not done in lfm3d..)
-      #  depth_q = apply_cached_rotary_emb(depth_encoding, q)
-      #  depth_k = apply_cached_rotary_emb(depth_encoding, k)
-      #  depth_context = self.inner_attn(depth_q, depth_k, v, mask=mask)
-      #  depth_message = self.depth_out_proj(context.transpose(1, 2).flatten(start_dim=-2))
-      #  # TODO: use a network to fuse this? don't use depth_out_proj? pros and cons?
-      #  message += depth_message
+        depth_q = apply_cached_rotary_emb(depth_encoding, q)
+        depth_k = apply_cached_rotary_emb(depth_encoding, k)
+        depth_context = self.inner_attn(depth_q, depth_k, v, mask=mask)
+        depth_message = self.depth_out_proj(context.transpose(1, 2).flatten(start_dim=-2))
+        # TODO: use a network to fuse this? don't use depth_out_proj? pros and cons?
+        message += depth_message
  
         #print(f"NaN percentage: {100.0 * torch.isnan(depth).sum().item() / depth.numel():.2f}%") 
         # TODO: include depth here!
