@@ -44,7 +44,7 @@ class DepthMatcher(BaseModel):
                 "valid_lines1",
             ]
 
-    @AMP_CUSTOM_FWD_F32
+    #@AMP_CUSTOM_FWD_F32
     def _forward(self, data):
         result = {}
         if self.conf.use_points:

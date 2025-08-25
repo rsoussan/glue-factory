@@ -20,14 +20,14 @@ iteration = 0
 
 
 # Hacky workaround for torch.amp.custom_fwd to support older versions of PyTorch.
-AMP_CUSTOM_FWD_F32 = (
-    torch.amp.custom_fwd(cast_inputs=torch.float32, device_type="cuda")
-    if hasattr(torch.amp, "custom_fwd")
-    else torch.cuda.amp.custom_fwd(cast_inputs=torch.float32)
-)
+#AMP_CUSTOM_FWD_F32 = (
+#    torch.amp.custom_fwd(cast_inputs=torch.float32, device_type="cuda")
+#    if hasattr(torch.amp, "custom_fwd")
+#    else torch.cuda.amp.custom_fwd(cast_inputs=torch.float32)
+#)
 
 
-@AMP_CUSTOM_FWD_F32
+#@AMP_CUSTOM_FWD_F32
 def normalize_keypoints(
     kpts: torch.Tensor, size: Optional[torch.Tensor] = None
 ) -> torch.Tensor:
@@ -41,7 +41,17 @@ def normalize_keypoints(
     kpts = (kpts - shift[..., None, :]) / scale[..., None, None]
     return kpts
 
-@AMP_CUSTOM_FWD_F32
+
+def nanmin(x, dim=None):
+    x_clean = torch.nan_to_num(x, nan=float('inf'))
+    return torch.min(x_clean, dim=dim) 
+
+def nanmax(x, dim=None):
+    x_clean = torch.nan_to_num(x, nan=float('-inf'))
+    return torch.max(x_clean, dim=dim) 
+
+
+#@AMP_CUSTOM_FWD_F32
 def normalize_depths(depths: torch.Tensor) -> torch.Tensor:
     """
     Normalize depths (batch, count) to be centered and scaled to [-1, 1].
@@ -52,9 +62,9 @@ def normalize_depths(depths: torch.Tensor) -> torch.Tensor:
     Returns:
         Normalized depths tensor (batch, num). 
     """
-    depth_range = depths.max(dim=1).values - depths.min(dim=1).values  
+    depth_range = nanmax(depths, dim=1).values - nanmin(depths, dim=1).values  
     depth_range = depth_range.to(depths)
-    shift = (depths.max(dim=1).values + depths.min(dim=1).values) / 2  
+    shift = (nanmax(depths, dim=1).values + nanmin(depths, dim=1).values) / 2  
     shift = shift.to(depths)
 
     # Add last dimension of 1 so these can be broadcasted when compared to depths 
@@ -236,10 +246,20 @@ class SelfBlock(nn.Module):
         depth_q = apply_cached_rotary_emb(depth_encoding, q)
         depth_k = apply_cached_rotary_emb(depth_encoding, k)
         depth_context = self.inner_attn(depth_q, depth_k, v, mask=mask)
-        depth_message = self.depth_out_proj(context.transpose(1, 2).flatten(start_dim=-2))
+        depth_message = self.depth_out_proj(depth_context.transpose(1, 2).flatten(start_dim=-2))
+        #print("depth message")
+        #print(depth_message.shape)
+        #print(f"[DBG] depth_message min={depth_message.min().item():.3e} max={depth_message.max().item():.3e}")
+        #print(depth_message)
+        #print("message pre")
+        #print(message.shape)
+        #print(message)
+        #print(f"depth message NaN percentage: {100.0 * torch.isnan(depth_message).sum().item() / depth_message.numel():.2f}%") 
         # TODO: use a network to fuse this? don't use depth_out_proj? pros and cons?
-        message += depth_message
- 
+        message = message + depth_message
+        #print("message post")
+        #print(message_2.shape)
+        #print(message_2)
         #print(f"NaN percentage: {100.0 * torch.isnan(depth).sum().item() / depth.numel():.2f}%") 
         # TODO: include depth here!
         return x + self.ffn(torch.cat([x, message], -1))
@@ -585,15 +605,19 @@ class LightGlue(nn.Module):
             assert key in data, f"Missing key {key} in data"
         kpts0, kpts1 = data["keypoints0"], data["keypoints1"]
         depth0, depth1 = data["depth_keypoints0"], data["depth_keypoints1"]
+        print(f"pre normalize NaN percentage: {100.0 * torch.isnan(depth0).sum().item() / depth0.numel():.2f}%") 
         depth0 = normalize_depths(depth0).clone()
+        print(f"post normalize NaN percentage: {100.0 * torch.isnan(depth0).sum().item() / depth0.numel():.2f}%") 
+
+        print(f"pre normalize d1 NaN percentage: {100.0 * torch.isnan(depth1).sum().item() / depth1.numel():.2f}%") 
         depth1 = normalize_depths(depth1).clone()
+        print(f"post normalize d1 NaN percentage: {100.0 * torch.isnan(depth1).sum().item() / depth1.numel():.2f}%") 
         # TODO: test filling training data depths w/ nearest valid neighbors?
         mask0 = valid_mask(depth0)
         mask1 = valid_mask(depth1)
         # Add trailing dimenion of 1 for depth values
         depth0 = depth0.unsqueeze(-1)
         depth1 = depth1.unsqueeze(-1)
-
         b, m, _ = kpts0.shape
         b, n, _ = kpts1.shape
         device = kpts0.device
@@ -637,7 +661,9 @@ class LightGlue(nn.Module):
         encoding0 = self.posenc(kpts0)
         encoding1 = self.posenc(kpts1)
         # cache depth embeddings
+        print(f"pre depth enc NaN percentage: {100.0 * torch.isnan(depth0).sum().item() / depth0.numel():.2f}%") 
         depth_encoding0 = self.depthenc(depth0)
+        print(f"post depth enc NaN percentage: {100.0 * torch.isnan(depth0).sum().item() / depth0.numel():.2f}%") 
         depth_encoding1 = self.depthenc(depth1)
 
         # GNN + final_proj + assignment

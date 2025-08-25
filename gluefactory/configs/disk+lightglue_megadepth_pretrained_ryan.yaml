@@ -44,8 +44,8 @@ model:
 train:
     seed: 0
     epochs: 50
-    log_every_iter: 100
-    eval_every_iter: 1000
+    log_every_iter: 10000000
+    eval_every_iter: 10000000
     lr: 1e-4
     lr_schedule:
         start: 30
