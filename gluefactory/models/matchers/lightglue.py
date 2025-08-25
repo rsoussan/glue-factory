@@ -615,6 +615,11 @@ class LightGlue(nn.Module):
         # TODO: test filling training data depths w/ nearest valid neighbors?
         mask0 = valid_mask(depth0)
         mask1 = valid_mask(depth1)
+        # Mark any depth nans as 0 so nans don't propogate during optimization. 
+        # Invalid depths are ignored later as masks are applied to attention calculation to zero out 
+        # contributions from keypoints with invalid depths
+        depth0 = depth0.nan_to_num(0)
+        depth1 = depth1.nan_to_num(0)
         # Add trailing dimenion of 1 for depth values
         depth0 = depth0.unsqueeze(-1)
         depth1 = depth1.unsqueeze(-1)
