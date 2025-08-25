@@ -553,8 +553,7 @@ def training(rank, conf, output_dir, args):
  #
                 #print(f"After backward: {torch.cuda.memory_allocated() / 1024**3:.2f} GB")
                 #print(f"Reserved:  {torch.cuda.memory_reserved() / 1024**3:.2f} GB")
-                #if args.detect_anomaly:
-                if True:
+                if True or args.detect_anomaly:
                     # Check for params without any gradient which causes
                     # problems in distributed training with checkpointing
                     detected_anomaly = False
