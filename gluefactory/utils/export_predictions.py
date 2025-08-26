@@ -32,8 +32,9 @@ def export_predictions(
     for data_ in tqdm(loader):
         data = batch_to_device(data_, device, non_blocking=True)
         pred = model(data)
-        if callback_fn is not None:
-            pred = {**callback_fn(pred, data), **pred}
+        if callback_fn:
+            for callback_f in callback_fn:
+                pred = {**callback_f(pred, data), **pred}
         if keys != "*":
             if len(set(keys) - set(pred.keys())) > 0:
                 raise ValueError(f"Missing key {set(keys) - set(pred.keys())}")

@@ -6,7 +6,7 @@ import torch
 from omegaconf import OmegaConf
 
 from ..datasets import get_dataset
-from ..geometry.depth import sample_depth
+from ..geometry.depth import sample_depth, sample_normals_from_depth
 from ..models import get_model
 from ..settings import DATA_PATH
 from ..utils.export_predictions import export_predictions
@@ -101,6 +101,9 @@ def get_kp_depth(pred, data):
     d, valid = sample_depth(pred["keypoints"], data["depth"])
     return {"depth_keypoints": d, "valid_depth_keypoints": valid}
 
+def get_kp_normal(pred, data):
+    d, valid = sample_normals_from_depth(pred["keypoints"], data["depth"], data["camera"].calibration_matrix())
+    return {"normal_keypoints": d, "valid_normal_keypoints": valid}
 
 def run_export(feature_file, scene, args):
     conf = {
@@ -130,14 +133,17 @@ def run_export(feature_file, scene, args):
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     model = get_model(conf.model.name)(conf.model).eval().to(device)
-
+    
+    callback_fns = [] 
     if args.export_sparse_depth:
-        callback_fn = get_kp_depth  # use this to store the depth of each keypoint
+        callback_fns.append(get_kp_depth)  # use this to store the depth of each keypoint
         keys = keys + ["depth_keypoints", "valid_depth_keypoints"]
-    else:
-        callback_fn = None
+    if args.export_sparse_normal:
+        callback_fns.append(get_kp_normal)  # use this to store the normals of each keypoint
+        keys = keys + ["normal_keypoints", "valid_normal_keypoints"]
+
     export_predictions(
-        loader, model, feature_file, as_half=True, keys=keys, callback_fn=callback_fn
+        loader, model, feature_file, as_half=True, keys=keys, callback_fn=callback_fns
     )
 
 
@@ -148,6 +154,7 @@ if __name__ == "__main__":
     parser.add_argument("--scenes", type=str, default=None)
     parser.add_argument("--num_workers", type=int, default=0)
     parser.add_argument("--export_sparse_depth", action="store_true")
+    parser.add_argument("--export_sparse_normal", action="store_true")
     args = parser.parse_args()
 
     export_name = configs[args.method]["name"]

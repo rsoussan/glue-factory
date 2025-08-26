@@ -204,6 +204,7 @@ class SelfBlock(nn.Module):
         self.inner_attn = Attention(flash)
         self.out_proj = nn.Linear(embed_dim, embed_dim, bias=bias)
         self.depth_out_proj = nn.Linear(embed_dim, embed_dim, bias=bias)
+        self.normal_out_proj = nn.Linear(embed_dim, embed_dim, bias=bias)
         self.ffn = nn.Sequential(
             nn.Linear(2 * embed_dim, 2 * embed_dim),
             nn.LayerNorm(2 * embed_dim, elementwise_affine=True),
@@ -216,6 +217,7 @@ class SelfBlock(nn.Module):
         x: torch.Tensor,
         encoding: torch.Tensor,
         depth_encoding: torch.Tensor,
+        normal_encoding: torch.Tensor,
         mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         qkv = self.Wqkv(x)
@@ -239,6 +241,16 @@ class SelfBlock(nn.Module):
         depth_message = self.depth_out_proj(depth_context.transpose(1, 2).flatten(start_dim=-2))
         # TODO: use a network to fuse this? don't use depth_out_proj? pros and cons?
         message = message + depth_message
+
+        # Add normal information
+        # TODO: generate different qkv for normal? (prob not, not done in lfm3d..)
+        normal_q = apply_cached_rotary_emb(normal_encoding, q)
+        normal_k = apply_cached_rotary_emb(normal_encoding, k)
+        normal_context = self.inner_attn(normal_q, normal_k, v, mask=mask)
+        normal_message = self.normal_out_proj(normal_context.transpose(1, 2).flatten(start_dim=-2))
+        # TODO: use a network to fuse this? don't use normal_out_proj? pros and cons?
+        message = message + normal_message
+ 
  
         #print(f"NaN percentage: {100.0 * torch.isnan(depth).sum().item() / depth.numel():.2f}%") 
         # TODO: include depth here!
@@ -396,25 +408,27 @@ class TransformerLayer(nn.Module):
         encoding0,
         encoding1,
         depth_encoding0,
-        depth_encoding1,
+        depth_encoding1, 
+        normal_encoding0, 
+        normal_encoding1,
         mask0: Optional[torch.Tensor] = None,
         mask1: Optional[torch.Tensor] = None,
     ):
         if mask0 is not None and mask1 is not None:
-            return self.masked_forward(desc0, desc1, encoding0, encoding1, depth_encoding0, depth_encoding1, mask0, mask1)
+            return self.masked_forward(desc0, desc1, encoding0, encoding1, depth_encoding0, depth_encoding1, normal_encoding0, normal_encoding1, mask0, mask1)
         else:
-            desc0 = self.self_attn(desc0, encoding0, depth_encoding0)
-            desc1 = self.self_attn(desc1, encoding1, depth_encoding1)
+            desc0 = self.self_attn(desc0, encoding0, depth_encoding0, normal_encoding0)
+            desc1 = self.self_attn(desc1, encoding1, depth_encoding1, normal_encoding1)
             return self.cross_attn(desc0, desc1)
 
     # This part is compiled and allows padding inputs
-    def masked_forward(self, desc0, desc1, encoding0, encoding1, depth_encoding0, depth_encoding1, mask0, mask1):
+    def masked_forward(self, desc0, desc1, encoding0, encoding1, depth_encoding0, depth_encoding1, normal_encoding0, normal_encoding1, mask0, mask1):
         mask = mask0 & mask1.transpose(-1, -2)
         mask0 = mask0 & mask0.transpose(-1, -2)
         mask1 = mask1 & mask1.transpose(-1, -2)
         #print("masked forward!")
-        desc0 = self.self_attn(desc0, encoding0, depth_encoding0, mask0)
-        desc1 = self.self_attn(desc1, encoding1, depth_encoding1, mask1)
+        desc0 = self.self_attn(desc0, encoding0, depth_encoding0, normal_encoding0, mask0)
+        desc1 = self.self_attn(desc1, encoding1, depth_encoding1, normal_encoding1, mask1)
         return self.cross_attn(desc0, desc1, mask)
 
 
@@ -519,6 +533,9 @@ class LightGlue(nn.Module):
         self.depthenc = LearnableFourierPositionalEncoding(
             1, head_dim, head_dim
         )
+        self.normalenc = LearnableFourierPositionalEncoding(
+            3, head_dim, head_dim
+        )
 
         h, n, d = conf.num_heads, conf.n_layers, conf.descriptor_dim
 
@@ -583,13 +600,16 @@ class LightGlue(nn.Module):
     def forward(self, data: dict) -> dict:
         for key in self.required_data_keys:
             assert key in data, f"Missing key {key} in data"
+        print(data.keys())
         kpts0, kpts1 = data["keypoints0"], data["keypoints1"]
         depth0, depth1 = data["depth_keypoints0"], data["depth_keypoints1"]
+        normal0, normal1 = data["normal_keypoints0"], data["normal_keypoints1"]
+        #normals0, normals1 = data["normals_keypoints0"], data["normals_keypoints1"]
         depth0 = normalize_depths(depth0).clone()
         depth1 = normalize_depths(depth1).clone()
         # TODO: test filling training data depths w/ nearest valid neighbors?
-        mask0 = valid_mask(depth0)
-        mask1 = valid_mask(depth1)
+        depth_mask0 = valid_mask(depth0)
+        depth_mask1 = valid_mask(depth1)
         # Mark any depth nans as 0 so nans don't propogate during optimization. 
         # Invalid depths are ignored later as masks are applied to attention calculation to zero out 
         # contributions from keypoints with invalid depths
@@ -598,6 +618,15 @@ class LightGlue(nn.Module):
         # Add trailing dimenion of 1 for depth values
         depth0 = depth0.unsqueeze(-1)
         depth1 = depth1.unsqueeze(-1)
+
+        # test w/ nn filling so all valid?
+        normal_mask0 = valid_mask(normal0)
+        normal_mask1 = valid_mask(normal1)
+
+        # TODO: make this function!
+        mask0 = fuse(depth_mask0, normal_mask0)
+        mask1 = fuse(depth_mask1, normal_mask1)
+ 
 
         b, m, _ = kpts0.shape
         b, n, _ = kpts1.shape
@@ -644,6 +673,10 @@ class LightGlue(nn.Module):
         # cache depth embeddings
         depth_encoding0 = self.depthenc(depth0)
         depth_encoding1 = self.depthenc(depth1)
+        # cache normal embeddings
+        normal_encoding0 = self.normalenc(normal0)
+        normal_encoding1 = self.normalenc(normal1)
+ 
 
         # GNN + final_proj + assignment
         do_early_stop = self.conf.depth_confidence > 0 and not self.training
@@ -668,12 +701,14 @@ class LightGlue(nn.Module):
                     encoding1,
                     depth_encoding0, 
                     depth_encoding1, 
+                    normal_encoding0, 
+                    normal_encoding1, 
                     mask0, 
                     mask1,
                     use_reentrant=False,  # Recommended by torch, default was True
                 )
             else:
-                desc0, desc1 = self.transformers[i](desc0, desc1, encoding0, encoding1, depth_encoding0, depth_encoding1, mask0, mask1)
+                desc0, desc1 = self.transformers[i](desc0, desc1, encoding0, encoding1, depth_encoding0, depth_encoding1, normal_encoding0, normal_encoding1, mask0, mask1)
             if self.training or i == self.conf.n_layers - 1:
                 all_desc0.append(desc0)
                 all_desc1.append(desc1)
