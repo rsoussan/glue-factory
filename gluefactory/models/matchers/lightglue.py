@@ -65,12 +65,10 @@ def normalize_depths(depths: torch.Tensor) -> torch.Tensor:
     return normalized_depths
 
 def valid_mask(depth: torch.Tensor) -> torch.BoolTensor:
-    mask_1d = ~torch.isnan(depth)  # (batch, num)
+    mask_1d = torch.isfinite(x).all(dim=-1)   # (batch, num)
     mask_2d = mask_1d.unsqueeze(2) & mask_1d.unsqueeze(1)  # (batch, num, num)
     # Expand mask for num_heads as expected in transformer layer
-    mask_2d = mask_2d.unsqueeze(1)
-    #print("Fully masked rows detected!" if (~torch.isfinite(mask_2d)).all(dim=-1).any() else "All mask rows OK")
-    #if (~mask_2d).all(dim=-1).any(): print("Valid mask: Some rows are fully masked")
+    mask_2d = mask_2d.unsqueeze(1) # (batch, 1, num, num)
     return mask_2d
 
 def rotate_half(x: torch.Tensor) -> torch.Tensor:
@@ -604,7 +602,7 @@ class LightGlue(nn.Module):
         kpts0, kpts1 = data["keypoints0"], data["keypoints1"]
         depth0, depth1 = data["depth_keypoints0"], data["depth_keypoints1"]
         normal0, normal1 = data["normal_keypoints0"], data["normal_keypoints1"]
-        #normals0, normals1 = data["normals_keypoints0"], data["normals_keypoints1"]
+
         depth0 = normalize_depths(depth0).clone()
         depth1 = normalize_depths(depth1).clone()
         # TODO: test filling training data depths w/ nearest valid neighbors?
@@ -623,9 +621,9 @@ class LightGlue(nn.Module):
         normal_mask0 = valid_mask(normal0)
         normal_mask1 = valid_mask(normal1)
 
-        # TODO: make this function!
-        mask0 = fuse(depth_mask0, normal_mask0)
-        mask1 = fuse(depth_mask1, normal_mask1)
+        # Fuse masks so only points with both valid depths and normals are used
+        mask0 = depth_mask0 & normal_mask0
+        mask1 = depth_mask1 & normal_mask1
  
 
         b, m, _ = kpts0.shape
