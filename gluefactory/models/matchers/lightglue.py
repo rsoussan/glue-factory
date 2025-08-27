@@ -64,8 +64,8 @@ def normalize_depths(depths: torch.Tensor) -> torch.Tensor:
     normalized_depths = (depths - shift) / (depth_range / 2)
     return normalized_depths
 
-def valid_mask(depth: torch.Tensor) -> torch.BoolTensor:
-    mask_1d = torch.isfinite(x).all(dim=-1)   # (batch, num)
+def valid_mask(x: torch.Tensor) -> torch.BoolTensor:
+    mask_1d = torch.isfinite(x).all(dim=-1) if x.dim() == 3 else torch.isfinite(x) # (batch, num)
     mask_2d = mask_1d.unsqueeze(2) & mask_1d.unsqueeze(1)  # (batch, num, num)
     # Expand mask for num_heads as expected in transformer layer
     mask_2d = mask_2d.unsqueeze(1) # (batch, 1, num, num)
