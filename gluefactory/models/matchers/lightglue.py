@@ -598,7 +598,6 @@ class LightGlue(nn.Module):
     def forward(self, data: dict) -> dict:
         for key in self.required_data_keys:
             assert key in data, f"Missing key {key} in data"
-        print(data.keys())
         kpts0, kpts1 = data["keypoints0"], data["keypoints1"]
         depth0, depth1 = data["depth_keypoints0"], data["depth_keypoints1"]
         normal0, normal1 = data["normal_keypoints0"], data["normal_keypoints1"]
