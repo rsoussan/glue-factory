@@ -38,6 +38,15 @@ def pad_local_features(pred: dict, seq_l: int):
         pred["valid_depth_keypoints"] = pad_to_length(
             pred["valid_depth_keypoints"], seq_l, -1, mode="zeros"
         )
+    if "normal_keypoints" in pred.keys():
+        pred["normal_keypoints"] = pad_to_length(
+            pred["normal_keypoints"], seq_l, -2, mode="zeros"
+        )
+    if "valid_normal_keypoints" in pred.keys():
+        pred["valid_normal_keypoints"] = pad_to_length(
+            pred["valid_normal_keypoints"], seq_l, -1, mode="zeros"
+        )
+ 
     return pred
 
 
