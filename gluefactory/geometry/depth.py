@@ -26,10 +26,10 @@ def sample_depth(pts, depth_):
     return interp, valid
 
 
-def sample_normals_from_depth(pts, depth, K):
+def sample_normals_from_depth(pts, depth_, K):
+    depth = torch.where(depth_ > 0, depth_, depth_.new_tensor(float("nan")))
     depth = depth[:, None]
     normals = kornia.geometry.depth.depth_to_normals(depth, K)
-    normals = torch.where(depth > 0, normals, 0.0)
     interp = sample_fmap(pts, normals)
     valid = (~torch.isnan(interp)) & (interp > 0)
     return interp, valid

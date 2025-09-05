@@ -34,6 +34,8 @@ def pad_to_length(
 
     if mode == "zeros":
         xn = torch.zeros(*shape, device=x.device, dtype=x.dtype)
+    elif mode == "nans":
+        xn = torch.full(shape, float("nan"), device=x.device, dtype=x.dtype)
     elif mode == "ones":
         xn = torch.ones(*shape, device=x.device, dtype=x.dtype)
     elif mode == "random":

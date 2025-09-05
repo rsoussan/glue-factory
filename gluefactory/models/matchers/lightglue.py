@@ -249,7 +249,6 @@ class SelfBlock(nn.Module):
         # TODO: use a network to fuse this? don't use normal_out_proj? pros and cons?
         message = message + normal_message
  
- 
         #print(f"NaN percentage: {100.0 * torch.isnan(depth).sum().item() / depth.numel():.2f}%") 
         # TODO: include depth here!
         return x + self.ffn(torch.cat([x, message], -1))
@@ -619,6 +618,9 @@ class LightGlue(nn.Module):
         # test w/ nn filling so all valid?
         normal_mask0 = valid_mask(normal0)
         normal_mask1 = valid_mask(normal1)
+
+        normal0 = normal0.nan_to_num(0)
+        normal1 = normal1.nan_to_num(0)
 
         # Fuse masks so only points with both valid depths and normals are used
         mask0 = depth_mask0 & normal_mask0
