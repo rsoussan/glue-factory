@@ -605,13 +605,13 @@ class LightGlue(nn.Module):
             assert key in data, f"Missing key {key} in data"
         kpts0, kpts1 = data["keypoints0"], data["keypoints1"]
         depth0, depth1 = data["depth_keypoints0"], data["depth_keypoints1"]
-        print(f"pre normalize NaN percentage: {100.0 * torch.isnan(depth0).sum().item() / depth0.numel():.2f}%") 
+        #print(f"pre normalize NaN percentage: {100.0 * torch.isnan(depth0).sum().item() / depth0.numel():.2f}%") 
         depth0 = normalize_depths(depth0).clone()
-        print(f"post normalize NaN percentage: {100.0 * torch.isnan(depth0).sum().item() / depth0.numel():.2f}%") 
+        #print(f"post normalize NaN percentage: {100.0 * torch.isnan(depth0).sum().item() / depth0.numel():.2f}%") 
 
-        print(f"pre normalize d1 NaN percentage: {100.0 * torch.isnan(depth1).sum().item() / depth1.numel():.2f}%") 
+        #print(f"pre normalize d1 NaN percentage: {100.0 * torch.isnan(depth1).sum().item() / depth1.numel():.2f}%") 
         depth1 = normalize_depths(depth1).clone()
-        print(f"post normalize d1 NaN percentage: {100.0 * torch.isnan(depth1).sum().item() / depth1.numel():.2f}%") 
+        #print(f"post normalize d1 NaN percentage: {100.0 * torch.isnan(depth1).sum().item() / depth1.numel():.2f}%") 
         # TODO: test filling training data depths w/ nearest valid neighbors?
         mask0 = valid_mask(depth0)
         mask1 = valid_mask(depth1)
@@ -666,9 +666,9 @@ class LightGlue(nn.Module):
         encoding0 = self.posenc(kpts0)
         encoding1 = self.posenc(kpts1)
         # cache depth embeddings
-        print(f"pre depth enc NaN percentage: {100.0 * torch.isnan(depth0).sum().item() / depth0.numel():.2f}%") 
+        #print(f"pre depth enc NaN percentage: {100.0 * torch.isnan(depth0).sum().item() / depth0.numel():.2f}%") 
         depth_encoding0 = self.depthenc(depth0)
-        print(f"post depth enc NaN percentage: {100.0 * torch.isnan(depth0).sum().item() / depth0.numel():.2f}%") 
+        #print(f"post depth enc NaN percentage: {100.0 * torch.isnan(depth0).sum().item() / depth0.numel():.2f}%") 
         depth_encoding1 = self.depthenc(depth1)
 
         # GNN + final_proj + assignment
