@@ -652,7 +652,7 @@ class LightGlue(nn.Module):
             1, head_dim, head_dim
         )
         self.normalenc = LearnableFourierPositionalEncoding(
-            2, head_dim, head_dim
+            3, head_dim, head_dim
         )
 
         h, n, d = conf.num_heads, conf.n_layers, conf.descriptor_dim
@@ -748,8 +748,8 @@ class LightGlue(nn.Module):
 #        normal0 = normal_to_stereographic_coordinates(normal0)
 #        normal1 = normal_to_stereographic_coordinates(normal1)
         # Use spherical coordinates?
-        normal0 = normal_to_spherical_coordinates(normal0)
-        normal1 = normal_to_spherical_coordinates(normal1)
+        #normal0 = normal_to_spherical_coordinates(normal0)
+        #normal1 = normal_to_spherical_coordinates(normal1)
 
         # Mask out invalid normals
         # test w/ nn filling so all valid?
