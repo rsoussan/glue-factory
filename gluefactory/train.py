@@ -597,6 +597,7 @@ def training(rank, conf, output_dir, args):
                         losses[k] = losses[k].sum(-1)
                         torch.distributed.reduce(losses[k], dst=0)
                         losses[k] /= train_loader.batch_size * args.n_gpus
+ 
                     losses[k] = torch.mean(losses[k], -1)
                     losses[k] = losses[k].item()
                 if rank == 0:
@@ -611,6 +612,30 @@ def training(rank, conf, output_dir, args):
                         "training/lr", optimizer.param_groups[0]["lr"], tot_n_samples
                     )
                     writer.add_scalar("training/epoch", epoch, tot_n_samples)
+                    # Write gradient norms
+                    for name, param in model.named_parameters():
+                        if param.grad is not None:
+                            prefix = ''
+                            if "depth" in name.lower():
+                                prefix = 'Depth'
+                            elif "self_attn" in name.lower():
+                                prefix = 'self_attn'
+                            elif "cross_attn" in name.lower():
+                                prefix = 'cross_attn'
+                            writer.add_scalar(f"{prefix}GradNorm/{name}", param.grad.norm(), tot_n_samples)
+                    # Write param stats
+                    for name, param in model.named_parameters():
+                        prefix = ''
+                        if "depth" in name.lower():
+                            prefix = 'Depth'
+                        elif "self_attn" in name.lower():
+                            prefix = 'self_attn'
+                        elif "cross_attn" in name.lower():
+                            prefix = 'cross_attn'
+ 
+                        writer.add_scalar(f"{prefix}WeightNorm/{name}", param.norm(), tot_n_samples)
+                        writer.add_histogram(f"{prefix}Weights/{name}", param, tot_n_samples)
+
 
             if conf.train.log_grad_every_iter is not None:
                 if it % conf.train.log_grad_every_iter == 0:

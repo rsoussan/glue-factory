@@ -553,6 +553,10 @@ class LightGlue(nn.Module):
 
         self.loss_fn = NLLLoss(conf.loss)
 
+        self.percent_invalid_depth0 = 0
+        self.percent_invalid_depth1 = 0
+        self.overlap = 0
+
         state_dict = None
         if conf.weights is not None:
             # weights can be either a path or an existing file from official LG
@@ -605,6 +609,9 @@ class LightGlue(nn.Module):
             assert key in data, f"Missing key {key} in data"
         kpts0, kpts1 = data["keypoints0"], data["keypoints1"]
         depth0, depth1 = data["depth_keypoints0"], data["depth_keypoints1"]
+        self.overlap = data['overlap_0to1']
+        self.percent_invalid_depth0 = 100.0 * (~torch.isfinite(depth0)).sum(dim=1) / depth0.size(1) 
+        self.percent_invalid_depth1 = 100.0 * (~torch.isfinite(depth1)).sum(dim=1) / depth1.size(1) 
         #print(f"pre normalize NaN percentage: {100.0 * torch.isnan(depth0).sum().item() / depth0.numel():.2f}%") 
         depth0 = normalize_depths(depth0).clone()
         #print(f"post normalize NaN percentage: {100.0 * torch.isnan(depth0).sum().item() / depth0.numel():.2f}%") 
@@ -812,6 +819,11 @@ class LightGlue(nn.Module):
         if self.training:
             losses["confidence"] = 0.0
 
+        # Add other loss metrics. Convert to tensor so these work with sum/mean operations for distributed learning.
+        # If these metrics are the same for each gpu distribution, log them instead in the train.py script.
+        losses["percent_invalid_depth0"] = self.percent_invalid_depth0 #torch.tensor(self.percent_invalid_depth0, device=pred['ref_descriptors0'].device, dtype=torch.float32)
+        losses["percent_invalid_depth1"] = self.percent_invalid_depth1 #torch.tensor(self.percent_invalid_depth1, device=pred['ref_descriptors0'].device, dtype=torch.float32)
+        losses["overlap"] = self.overlap #torch.tensor(self.percent_invalid_depth1, device=pred['ref_descriptors0'].device, dtype=torch.float32)
         #print(f"Loss Computed nll: {torch.cuda.memory_allocated() / 1024**3:.2f} GB")
         # B = pred['log_assignment'].shape[0]
         losses["row_norm"] = pred["log_assignment"].exp()[:, :-1].sum(2).mean(1)
