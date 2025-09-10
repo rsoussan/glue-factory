@@ -20,14 +20,14 @@ iteration = 0
 
 
 # Hacky workaround for torch.amp.custom_fwd to support older versions of PyTorch.
-AMP_CUSTOM_FWD_F32 = (
-    torch.amp.custom_fwd(cast_inputs=torch.float32, device_type="cuda")
-    if hasattr(torch.amp, "custom_fwd")
-    else torch.cuda.amp.custom_fwd(cast_inputs=torch.float32)
-)
+#AMP_CUSTOM_FWD_F32 = (
+#    torch.amp.custom_fwd(cast_inputs=torch.float32, device_type="cuda")
+#    if hasattr(torch.amp, "custom_fwd")
+#    else torch.cuda.amp.custom_fwd(cast_inputs=torch.float32)
+#)
 
 
-@AMP_CUSTOM_FWD_F32
+#@AMP_CUSTOM_FWD_F32
 def normalize_keypoints(
     kpts: torch.Tensor, size: Optional[torch.Tensor] = None
 ) -> torch.Tensor:
@@ -41,7 +41,17 @@ def normalize_keypoints(
     kpts = (kpts - shift[..., None, :]) / scale[..., None, None]
     return kpts
 
-@AMP_CUSTOM_FWD_F32
+
+def nanmin(x, dim=None):
+    x_clean = torch.nan_to_num(x, nan=float('inf'))
+    return torch.min(x_clean, dim=dim) 
+
+def nanmax(x, dim=None):
+    x_clean = torch.nan_to_num(x, nan=float('-inf'))
+    return torch.max(x_clean, dim=dim) 
+
+
+#@AMP_CUSTOM_FWD_F32
 def normalize_depths(depths: torch.Tensor) -> torch.Tensor:
     """
     Normalize depths (batch, count) to be centered and scaled to [-1, 1].
@@ -52,9 +62,9 @@ def normalize_depths(depths: torch.Tensor) -> torch.Tensor:
     Returns:
         Normalized depths tensor (batch, num). 
     """
-    depth_range = depths.max(dim=1).values - depths.min(dim=1).values  
+    depth_range = nanmax(depths, dim=1).values - nanmin(depths, dim=1).values  
     depth_range = depth_range.to(depths)
-    shift = (depths.max(dim=1).values + depths.min(dim=1).values) / 2  
+    shift = (nanmax(depths, dim=1).values + nanmin(depths, dim=1).values) / 2  
     shift = shift.to(depths)
 
     # Add last dimension of 1 so these can be broadcasted when compared to depths 
@@ -341,6 +351,14 @@ class SelfBlock(nn.Module):
         depth_k = apply_cached_rotary_emb(depth_encoding, k)
         depth_context = self.inner_attn(depth_q, depth_k, v, mask=mask)
         depth_message = self.depth_out_proj(depth_context.transpose(1, 2).flatten(start_dim=-2))
+        #print("depth message")
+        #print(depth_message.shape)
+        #print(f"[DBG] depth_message min={depth_message.min().item():.3e} max={depth_message.max().item():.3e}")
+        #print(depth_message)
+        #print("message pre")
+        #print(message.shape)
+        #print(message)
+        #print(f"depth message NaN percentage: {100.0 * torch.isnan(depth_message).sum().item() / depth_message.numel():.2f}%") 
         # TODO: use a network to fuse this? don't use depth_out_proj? pros and cons?
         message = message + depth_message
 
@@ -352,7 +370,6 @@ class SelfBlock(nn.Module):
         normal_message = self.normal_out_proj(normal_context.transpose(1, 2).flatten(start_dim=-2))
         # TODO: use a network to fuse this? don't use normal_out_proj? pros and cons?
         message = message + normal_message
- 
         #print(f"NaN percentage: {100.0 * torch.isnan(depth).sum().item() / depth.numel():.2f}%") 
         # TODO: include depth here!
         return x + self.ffn(torch.cat([x, message], -1))
@@ -651,6 +668,10 @@ class LightGlue(nn.Module):
 
         self.loss_fn = NLLLoss(conf.loss)
 
+        self.percent_invalid_depth0 = 0
+        self.percent_invalid_depth1 = 0
+        self.overlap = 0
+
         state_dict = None
         if conf.weights is not None:
             # weights can be either a path or an existing file from official LG
@@ -704,7 +725,11 @@ class LightGlue(nn.Module):
         kpts0, kpts1 = data["keypoints0"], data["keypoints1"]
         depth0, depth1 = data["depth_keypoints0"], data["depth_keypoints1"]
         normal0, normal1 = data["normal_keypoints0"], data["normal_keypoints1"]
-            
+
+        self.overlap = data['overlap_0to1']
+        self.percent_invalid_depth0 = 100.0 * (~torch.isfinite(depth0)).sum(dim=1) / depth0.size(1) 
+        self.percent_invalid_depth1 = 100.0 * (~torch.isfinite(depth1)).sum(dim=1) / depth1.size(1) 
+
         depth0 = normalize_depths(depth0).clone()
         depth1 = normalize_depths(depth1).clone()
         # TODO: test filling training data depths w/ nearest valid neighbors?
@@ -722,11 +747,9 @@ class LightGlue(nn.Module):
         # Convert normals to stereographic projection for more meaningful difference metric
 #        normal0 = normal_to_stereographic_coordinates(normal0)
 #        normal1 = normal_to_stereographic_coordinates(normal1)
-
+        # Use spherical coordinates?
         normal0 = normal_to_spherical_coordinates(normal0)
         normal1 = normal_to_spherical_coordinates(normal1)
-
-
 
         # Mask out invalid normals
         # test w/ nn filling so all valid?
@@ -741,7 +764,6 @@ class LightGlue(nn.Module):
         mask0 = depth_mask0 & normal_mask0
         mask1 = depth_mask1 & normal_mask1
  
-
         b, m, _ = kpts0.shape
         b, n, _ = kpts1.shape
         device = kpts0.device
@@ -785,7 +807,9 @@ class LightGlue(nn.Module):
         encoding0 = self.posenc(kpts0)
         encoding1 = self.posenc(kpts1)
         # cache depth embeddings
+        #print(f"pre depth enc NaN percentage: {100.0 * torch.isnan(depth0).sum().item() / depth0.numel():.2f}%") 
         depth_encoding0 = self.depthenc(depth0)
+        #print(f"post depth enc NaN percentage: {100.0 * torch.isnan(depth0).sum().item() / depth0.numel():.2f}%") 
         depth_encoding1 = self.depthenc(depth1)
         # cache normal embeddings
         normal_encoding0 = self.normalenc(normal0)
@@ -935,6 +959,11 @@ class LightGlue(nn.Module):
         if self.training:
             losses["confidence"] = 0.0
 
+        # Add other loss metrics. Convert to tensor so these work with sum/mean operations for distributed learning.
+        # If these metrics are the same for each gpu distribution, log them instead in the train.py script.
+        losses["percent_invalid_depth0"] = self.percent_invalid_depth0 #torch.tensor(self.percent_invalid_depth0, device=pred['ref_descriptors0'].device, dtype=torch.float32)
+        losses["percent_invalid_depth1"] = self.percent_invalid_depth1 #torch.tensor(self.percent_invalid_depth1, device=pred['ref_descriptors0'].device, dtype=torch.float32)
+        losses["overlap"] = self.overlap #torch.tensor(self.percent_invalid_depth1, device=pred['ref_descriptors0'].device, dtype=torch.float32)
         #print(f"Loss Computed nll: {torch.cuda.memory_allocated() / 1024**3:.2f} GB")
         # B = pred['log_assignment'].shape[0]
         losses["row_norm"] = pred["log_assignment"].exp()[:, :-1].sum(2).mean(1)

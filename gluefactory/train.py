@@ -5,6 +5,8 @@ Author: Paul-Edouard Sarlin (skydes)
 """
 
 import argparse
+import os
+os.environ["TORCH_DISTRIBUTED_DEBUG"] = "DETAIL"
 import copy
 import re
 import shutil
@@ -215,6 +217,11 @@ def write_image_summaries(writer, name, figures, step):
         for k, fig in figures.items():
             writer.add_figure(f"{name}/{k}", fig, step)
 
+def check_grad(grad):
+    if grad is None:
+        print("Wr did not receive grad!")
+    else:
+        print("Wr.weight gradient norm:", grad.norm().item())
 
 def training(rank, conf, output_dir, args):
     torch.autograd.set_detect_anomaly(True)
@@ -343,7 +350,14 @@ def training(rank, conf, output_dir, args):
     torch.backends.cudnn.benchmark = True
     if args.detect_anomaly:
         torch.autograd.set_detect_anomaly(True)
+    #def debug_hook(module, inp, out):
+    #    print(f"[HOOK] {module.__class__.__name__} called | "
+    #        f"input requires_grad={inp[0].requires_grad} | "
+    #        f"output requires_grad={out.requires_grad}")
 
+    #model.matcher.depthenc.Wr.register_forward_hook(debug_hook)
+    #model.module.matcher.depthenc.Wr.weight.register_hook(check_grad)
+    #model.matcher.depthenc.Wr.weight.register_hook(check_grad)
     optimizer_fn = {
         "sgd": torch.optim.SGD,
         "adam": torch.optim.Adam,
@@ -359,6 +373,38 @@ def training(rank, conf, output_dir, args):
     optimizer = optimizer_fn(
         lr_params, lr=conf.train.lr, **conf.train.optimizer_options
     )
+
+    # flatten all parameters currently in the optimizer
+#    opt_params = [p for group in optimizer.param_groups for p in group["params"]]
+#
+#    # print whether each model parameter is in the optimizer
+#    for n, p in model.named_parameters():
+#        if "depth" in n:
+#            in_opt = any(p is q for q in opt_params)  # object identity check
+#            print(f"{n} | requires_grad={p.requires_grad} | in optimizer? {in_opt}")
+#
+#
+#    # collect all parameter names in lr_params
+#    opt_param_names = set()
+#    for group in lr_params:
+#        for p in group["params"]:
+#        # find the name corresponding to this parameter
+#            for n2, p2 in model.named_parameters():
+#                if p2 is p:
+#                    opt_param_names.add(n2)
+#                    break
+#
+#    # print optimizer parameter names containing "depth"
+#    for name in opt_param_names:
+#        if "depth" in name.lower():  # lowercase to be case-insensitive
+#            print(f"In optimizer: {name}")
+#
+#    # print parameters that require grad but are not in optimizer
+#    for n, p in model.named_parameters():
+#        if p.requires_grad and n not in opt_param_names:
+#            print(f"{n} requires_grad=True but is NOT in optimizer")
+#
+
     use_mp = args.mixed_precision is not None
     scaler = (
         torch.amp.GradScaler("cuda", enabled=use_mp)
@@ -484,7 +530,6 @@ def training(rank, conf, output_dir, args):
                 print(f"Detected NAN, skipping iteration {it}")
                 del pred, data, loss, losses
                 continue
-
             do_backward = loss.requires_grad
             if args.distributed:
                 do_backward = torch.tensor(do_backward).float().to(device)
@@ -493,7 +538,18 @@ def training(rank, conf, output_dir, args):
                 )
                 do_backward = do_backward > 0
             if do_backward:
+                #print("in do backwards! computing gradients!")
                 scaler.scale(loss).backward()
+                #print("all params:")
+ #               print({n: {"requires_grad": p.requires_grad,
+ #                  "grad_norm": (p.grad.norm().item() if p.grad is not None else None)}
+ #              #     for n, p in model.named_parameters() if "depthenc.Wr" in n})
+ #                   for n, p in model.named_parameters()})
+ #               print("depth only:")
+ #               print({n: {"depth requires_grad": p.requires_grad,
+ #                  "grad_norm": (p.grad.norm().item() if p.grad is not None else None)}
+ #                   for n, p in model.named_parameters() if "depth" in n})
+ #
                 #print(f"After backward: {torch.cuda.memory_allocated() / 1024**3:.2f} GB")
                 #print(f"Reserved:  {torch.cuda.memory_reserved() / 1024**3:.2f} GB")
                 if True or args.detect_anomaly:
@@ -540,6 +596,7 @@ def training(rank, conf, output_dir, args):
                         losses[k] = losses[k].sum(-1)
                         torch.distributed.reduce(losses[k], dst=0)
                         losses[k] /= train_loader.batch_size * args.n_gpus
+ 
                     losses[k] = torch.mean(losses[k], -1)
                     losses[k] = losses[k].item()
                 if rank == 0:
@@ -554,6 +611,30 @@ def training(rank, conf, output_dir, args):
                         "training/lr", optimizer.param_groups[0]["lr"], tot_n_samples
                     )
                     writer.add_scalar("training/epoch", epoch, tot_n_samples)
+                    # Write gradient norms
+                    for name, param in model.named_parameters():
+                        if param.grad is not None:
+                            prefix = ''
+                            if "depth" in name.lower():
+                                prefix = 'Depth'
+                            elif "self_attn" in name.lower():
+                                prefix = 'self_attn'
+                            elif "cross_attn" in name.lower():
+                                prefix = 'cross_attn'
+                            writer.add_scalar(f"{prefix}GradNorm/{name}", param.grad.norm(), tot_n_samples)
+                    # Write param stats
+                    for name, param in model.named_parameters():
+                        prefix = ''
+                        if "depth" in name.lower():
+                            prefix = 'Depth'
+                        elif "self_attn" in name.lower():
+                            prefix = 'self_attn'
+                        elif "cross_attn" in name.lower():
+                            prefix = 'cross_attn'
+ 
+                        writer.add_scalar(f"{prefix}WeightNorm/{name}", param.norm(), tot_n_samples)
+                        writer.add_histogram(f"{prefix}Weights/{name}", param, tot_n_samples)
+
 
             if conf.train.log_grad_every_iter is not None:
                 if it % conf.train.log_grad_every_iter == 0:
