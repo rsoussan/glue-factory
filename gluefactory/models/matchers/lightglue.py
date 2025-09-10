@@ -64,6 +64,110 @@ def normalize_depths(depths: torch.Tensor) -> torch.Tensor:
     normalized_depths = (depths - shift) / (depth_range / 2)
     return normalized_depths
 
+
+def normal_to_spherical_coordinates(normal_tensor: torch.Tensor) -> torch.Tensor:
+    """
+    Converts a PyTorch tensor of 3D unit normal vectors to 2D spherical coordinates.
+
+    This function is designed to handle a batched input tensor with shape [B, N, 3].
+    It parameterizes each vector using two angles: the polar angle phi and the
+    azimuthal angle theta.
+
+    Args:
+        normal_tensor (torch.Tensor): A tensor of 3D unit normal vectors with a
+                                      shape of [B, N, 3]. The vectors in the
+                                      last dimension should be normalized.
+
+    Returns:
+        torch.Tensor: The corresponding 2D spherical coordinates with a
+                      shape of [B, N, 2]. The coordinates are (phi, theta),
+                      where phi is the polar angle [0, pi] and theta is the
+                      azimuthal angle [-pi, pi].
+    """
+    # Store the original shape for reshaping later
+    original_shape = normal_tensor.shape
+    B, N = original_shape[0], original_shape[1]
+
+    # Reshape the tensor to a flat list of vectors [B*N, 3] for processing
+    flat_normals = normal_tensor.view(-1, 3)
+    
+    # Extract x, y, z components
+    x = flat_normals[:, 0]
+    y = flat_normals[:, 1]
+    z = flat_normals[:, 2]
+
+    # Calculate the polar angle (phi) using arccos of the z-component.
+    # phi is the angle from the positive z-axis, in the range [0, pi].
+    # torch.acos is stable for inputs in [-1, 1].
+    phi = torch.acos(z)
+    
+    # Calculate the azimuthal angle (theta) using atan2 of y and x.
+    # theta is the angle in the xy-plane, in the range [-pi, pi].
+    # torch.atan2 is robust to all quadrants and x=0.
+    theta = torch.atan2(y, x)
+    
+    # Stack the phi and theta coordinates and reshape back to the original dimensions
+    # with the last dimension as 2.
+    spherical_coords = torch.stack([phi, theta], dim=-1)
+    
+    return spherical_coords.view(B, N, 2)
+
+def normal_to_stereographic_coordinates(normal_tensor: torch.Tensor) -> torch.Tensor:
+    """
+    Converts a PyTorch tensor of 3D normal vectors to 2D stereographic coordinates.
+
+    This function is designed to handle a batched input tensor with shape [B, N, 3].
+    It uses the south pole (0, 0, -1) as the reference point for the stereographic
+    projection, which is useful when vectors are concentrated near the north pole
+    (0, 0, 1).
+
+    Args:
+        normal_tensor (torch.Tensor): A tensor of 3D unit normal vectors with a
+                                      shape of [B, N, 3]. The vectors in the
+                                      last dimension should be normalized.
+
+    Returns:
+        torch.Tensor: The corresponding 2D stereographic coordinates with a
+                      shape of [B, N, 2]. Returns NaN for coordinates
+                      corresponding to the south pole.
+    """
+    # Store the original shape for reshaping later
+    original_shape = normal_tensor.shape
+    B, N = original_shape[0], original_shape[1]
+
+    # Reshape the tensor to a flat list of vectors [B*N, 3] for processing
+    flat_normals = normal_tensor.view(-1, 3)
+    
+    # Extract x, y, z components
+    x = flat_normals[:, 0]
+    y = flat_normals[:, 1]
+    z = flat_normals[:, 2]
+
+    # Calculate the denominator (1 + z) for the projection
+    denominator = 1 + z
+    
+    # Handle the singularity at the south pole where z = -1.
+    # We use a small epsilon to avoid division by zero and then replace with NaN.
+    # Create a boolean mask for the singular points
+    is_singular = torch.isclose(denominator, torch.zeros_like(denominator))
+    
+    # Replace the singular denominator with a non-zero value to prevent errors
+    denominator[is_singular] = 1.0  # Or any non-zero value
+    
+    # Apply the projection formula
+    u = x / denominator
+    v = y / denominator
+    
+    # Set the coordinates for the singular points (south pole) to NaN
+    u[is_singular] = torch.nan
+    v[is_singular] = torch.nan
+    
+    # Stack the u and v coordinates and reshape back to the original dimensions
+    # with the last dimension as 2
+    stereographic_coords = torch.stack([u, v], dim=-1)
+    
+    return stereographic_coords.view(B, N, 2)
+
 def valid_mask(x: torch.Tensor) -> torch.BoolTensor:
     mask_1d = torch.isfinite(x).all(dim=-1) if x.dim() == 3 else torch.isfinite(x) # (batch, num)
     mask_2d = mask_1d.unsqueeze(2) & mask_1d.unsqueeze(1)  # (batch, num, num)
@@ -531,7 +635,7 @@ class LightGlue(nn.Module):
             1, head_dim, head_dim
         )
         self.normalenc = LearnableFourierPositionalEncoding(
-            3, head_dim, head_dim
+            2, head_dim, head_dim
         )
 
         h, n, d = conf.num_heads, conf.n_layers, conf.descriptor_dim
@@ -600,7 +704,7 @@ class LightGlue(nn.Module):
         kpts0, kpts1 = data["keypoints0"], data["keypoints1"]
         depth0, depth1 = data["depth_keypoints0"], data["depth_keypoints1"]
         normal0, normal1 = data["normal_keypoints0"], data["normal_keypoints1"]
-
+            
         depth0 = normalize_depths(depth0).clone()
         depth1 = normalize_depths(depth1).clone()
         # TODO: test filling training data depths w/ nearest valid neighbors?
@@ -615,10 +719,21 @@ class LightGlue(nn.Module):
         depth0 = depth0.unsqueeze(-1)
         depth1 = depth1.unsqueeze(-1)
 
+        # Convert normals to stereographic projection for more meaningful difference metric
+#        normal0 = normal_to_stereographic_coordinates(normal0)
+#        normal1 = normal_to_stereographic_coordinates(normal1)
+
+        normal0 = normal_to_spherical_coordinates(normal0)
+        normal1 = normal_to_spherical_coordinates(normal1)
+
+
+
+        # Mask out invalid normals
         # test w/ nn filling so all valid?
         normal_mask0 = valid_mask(normal0)
         normal_mask1 = valid_mask(normal1)
 
+        # Convert nans to 0 to avoid nans in backprop. These will be ignored by the mask anyway.
         normal0 = normal0.nan_to_num(0)
         normal1 = normal1.nan_to_num(0)
 

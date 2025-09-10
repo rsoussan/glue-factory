@@ -13,8 +13,8 @@ data:
     num_overlap_bins: 3
     read_depth: true
     read_image: true
-    batch_size: 12
-    num_workers: 6
+    batch_size: 32 
+    num_workers: 14
     load_features:
         do: true # enable this if you have cached predictions
         path: exports/megadepth-undist-depth-r1024_DISK-k2048-nms5/{scene}.h5
@@ -46,7 +46,7 @@ train:
     epochs: 50
     log_every_iter: 100
     eval_every_iter: 1000
-    lr: 1e-4
+    lr: 1e-5
     lr_schedule:
         start: 30
         type: exp
@@ -54,6 +54,7 @@ train:
         exp_div_10: 10
     dataset_callback_fn: sample_new_items
     plot: [5, 'gluefactory.visualization.visualize_batch.make_match_figures']
+    lr_scaling: [[10, ['normal', 'Normal']]]
 benchmarks:
     megadepth1500:
         data:

@@ -170,7 +170,6 @@ def get_lr_scheduler(optimizer, conf):
             return 1.0 if it < conf.start else gam
         else:
             raise ValueError(conf.type)
-
     return torch.optim.lr_scheduler.MultiplicativeLR(optimizer, lr_fn)
 
 
@@ -377,7 +376,7 @@ def training(rank, conf, output_dir, args):
     results = None  # fix bug with it saving
 
     lr_scheduler = get_lr_scheduler(optimizer=optimizer, conf=conf.train.lr_schedule)
-    if args.restore:
+    if False: #args.restore:
         optimizer.load_state_dict(init_cp["optimizer"])
         if "lr_scheduler" in init_cp:
             lr_scheduler.load_state_dict(init_cp["lr_scheduler"])
