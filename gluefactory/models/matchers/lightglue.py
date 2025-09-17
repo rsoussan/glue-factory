@@ -739,6 +739,18 @@ class LightGlue(nn.Module):
         desc0, desc1 = desc0[..., :m, :], desc1[..., :n, :]
         scores, _ = self.log_assignment[i](desc0, desc1)
         m0, m1, mscores0, mscores1 = filter_matches(scores, self.conf.filter_threshold)
+        matches, mscores = [], []
+        
+        if not self.training:
+            for k in range(b):
+                valid = m0[k] > -1
+                m_indices_0 = torch.where(valid)[0]
+                m_indices_1 = m0[k][valid]
+                if do_point_pruning:
+                    m_indices_0 = ind0[k, m_indices_0]
+                    m_indices_1 = ind1[k, m_indices_1]
+                matches.append(torch.stack([m_indices_0, m_indices_1], -1))
+                mscores.append(mscores0[k][valid])
 
         if do_point_pruning:
             m0_ = torch.full((b, m), -1, device=m0.device, dtype=m0.dtype)
@@ -761,6 +773,8 @@ class LightGlue(nn.Module):
             "matching_scores1": mscores1,
             "ref_descriptors0": torch.stack(all_desc0, 1),
             "ref_descriptors1": torch.stack(all_desc1, 1),
+            "matches": matches,
+            "scores": mscores,
             "log_assignment": scores,
             "prune0": prune0,
             "prune1": prune1,
