@@ -695,10 +695,10 @@ def training(rank, conf, output_dir, args):
                     write_dict_summaries(writer, "val", results, tot_n_samples)
                     write_dict_summaries(writer, "val", pr_metrics, tot_n_samples)
                     write_image_summaries(writer, "figures", figures, tot_n_samples)
-                   # RGSW validation
-                   write_dict_summaries(writer, "rgsw_val", rgsw_results, tot_n_samples)
-                   write_dict_summaries(writer, "rgsw_val", rgsw_pr_metrics, tot_n_samples)
-                   write_image_summaries(writer, "rgsw_figures", rgsw_figures, tot_n_samples)
+                    # RGSW validation
+                    write_dict_summaries(writer, "rgsw_val", rgsw_results, tot_n_samples)
+                    write_dict_summaries(writer, "rgsw_val", rgsw_pr_metrics, tot_n_samples)
+                    write_image_summaries(writer, "rgsw_figures", rgsw_figures, tot_n_samples)
  
                     # @TODO: optional always save checkpoint
                     if results[conf.train.best_key] < best_eval:
