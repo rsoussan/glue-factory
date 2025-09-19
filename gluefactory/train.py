@@ -23,6 +23,7 @@ from tqdm import tqdm
 
 from . import __module_name__, logger, settings
 from .datasets import get_dataset
+from .datasets.rgsw import RGSW
 from .eval import run_benchmark
 from .models import get_model
 from .utils.experiments import get_best_checkpoint, get_last_checkpoint, save_experiment
@@ -325,6 +326,8 @@ def training(rank, conf, output_dir, args):
     if rank == 0:
         logger.info(f"Training loader has {len(train_loader)} batches")
         logger.info(f"Validation loader has {len(val_loader)} batches")
+
+    rgsw_loader = RGSW().get_dataloader()
 
     # interrupts are caught and delayed for graceful termination
     def sigint_handler(signal, frame):
@@ -662,6 +665,15 @@ def training(rank, conf, output_dir, args):
                 or it == (len(train_loader) - 1)
             ):
                 with fork_rng(seed=conf.train.seed):
+                    rgsw_results, rgsw_pr_metrics, rgsw_figures = do_evaluation(
+                        model,
+                        rgsw_loader,
+                        device,
+                        loss_fn,
+                        conf.train,
+                        rank,
+                        pbar=(rank == 0),
+                    )
                     results, pr_metrics, figures = do_evaluation(
                         model,
                         val_loader,
@@ -671,6 +683,7 @@ def training(rank, conf, output_dir, args):
                         rank,
                         pbar=(rank == 0),
                     )
+ 
 
                 if rank == 0:
                     str_results = [
@@ -682,6 +695,11 @@ def training(rank, conf, output_dir, args):
                     write_dict_summaries(writer, "val", results, tot_n_samples)
                     write_dict_summaries(writer, "val", pr_metrics, tot_n_samples)
                     write_image_summaries(writer, "figures", figures, tot_n_samples)
+                   # RGSW validation
+                   write_dict_summaries(writer, "rgsw_val", rgsw_results, tot_n_samples)
+                   write_dict_summaries(writer, "rgsw_val", rgsw_pr_metrics, tot_n_samples)
+                   write_image_summaries(writer, "rgsw_figures", rgsw_figures, tot_n_samples)
+ 
                     # @TODO: optional always save checkpoint
                     if results[conf.train.best_key] < best_eval:
                         best_eval = results[conf.train.best_key]
