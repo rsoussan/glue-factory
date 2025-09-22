@@ -593,18 +593,14 @@ class LightGlue(nn.Module):
 
         point3d0 = point3d(kpts0, camera0, depth0) 
         point3d1 = point3d(kpts1, camera1, depth1) 
-        print(f"point3d shape A: {point3d0.shape}")
         
         # Normalize
         point3d0 = normalize_points_3d(point3d0).clone()
         point3d1 = normalize_points_3d(point3d1).clone()
-        print(f"point3d shape B: {point3d0.shape}")
         #print(f"post normalize d1 NaN percentage: {100.0 * torch.isnan(point3d1).sum().item() / point3d1.numel():.2f}%") 
         # TODO: test filling training data point3ds w/ nearest valid neighbors?
         mask0 = valid_mask(point3d0)
         mask1 = valid_mask(point3d1)
-        print(f"mask0 shape: {mask0.shape}")
-        print(f"mask1 shape: {mask1.shape}")
         # Mark any point3d nans as 0 so nans don't propogate during optimization. 
         # Invalid point3ds are ignored later as masks are applied to attention calculation to zero out 
         # contributions from keypoints with invalid point3ds
@@ -650,7 +646,6 @@ class LightGlue(nn.Module):
         desc0 = self.input_proj(desc0)
         desc1 = self.input_proj(desc1)
         # cache positional embeddings
-        print(f"point3d shape C: {point3d0.shape}")
         encoding0 = self.posenc(point3d0)
         encoding1 = self.posenc(point3d1)
 

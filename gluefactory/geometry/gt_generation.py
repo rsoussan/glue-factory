@@ -12,6 +12,106 @@ UNMATCHED_FEATURE = -1
 
 @torch.no_grad()
 def gt_matches_from_pose_depth(
+    kp0, kp1, data, pos_th=1000, neg_th=1000, epi_th=None, cc_th=None, **kw
+):
+    pos_th = 1000
+    neg_th = 1000
+    print("=== gt_matches_from_pose_depth_debug ===")
+    print(f"kp0 shape: {kp0.shape}, kp1 shape: {kp1.shape}")
+
+    if kp0.shape[1] == 0 or kp1.shape[1] == 0:
+        b_size, n_kp0 = kp0.shape[:2]
+        n_kp1 = kp1.shape[1]
+        assignment = torch.zeros(
+            b_size, n_kp0, n_kp1, dtype=torch.bool, device=kp0.device
+        )
+        m0 = -torch.ones_like(kp0[:, :, 0]).long()
+        m1 = -torch.ones_like(kp1[:, :, 0]).long()
+        print("No keypoints, returning empty assignment.")
+        return assignment, m0, m1
+
+    camera0, camera1 = data["view0"]["camera"], data["view1"]["camera"]
+    T_0to1, T_1to0 = data["T_0to1"], data.get("T_1to0", data["T_0to1"].inv())
+
+    depth0 = data["view0"].get("depth")
+    depth1 = data["view1"].get("depth")
+
+    if "depth_keypoints0" in kw and "depth_keypoints1" in kw:
+        d0, valid0 = kw["depth_keypoints0"], kw["valid_depth_keypoints0"]
+        d1, valid1 = kw["depth_keypoints1"], kw["valid_depth_keypoints1"]
+        print("Using provided keypoint depths.")
+        print(f"d0 shape {d0.shape}, d1 shape {d1.shape}")
+    else:
+        assert depth0 is not None and depth1 is not None
+        d0, valid0 = sample_depth(kp0, depth0)
+        d1, valid1 = sample_depth(kp1, depth1)
+        print(f"Sampled depths: d0 {d0.shape}, d1 {d1.shape}")
+
+    print("Projecting keypoints...")
+    print(f"num keypoints0: {kp0.shape}")
+    print(f"num keypoints1: {kp1.shape}")
+    print(f"num valid d0: {d0.isfinite().sum()}, invalid: {kp0.shape[1] - d0.isfinite().sum()}")
+    print(f"num valid d1: {d1.isfinite().sum()}, invalid: {kp1.shape[1] - d1.isfinite().sum()}")
+    kp0_1, visible0 = project(kp0, d0, depth1, camera0, camera1, T_0to1, valid0, ccth=cc_th)
+    kp1_0, visible1 = project(kp1, d1, depth0, camera1, camera0, T_1to0, valid1, ccth=cc_th)
+    print(f"Projected kp0->1 shape: {kp0_1.shape}, visible0 sum: {visible0.sum()}, nonvisibile: {d0.isfinite().sum() - visible0.sum()}")
+    print(f"Projected kp1->0 shape: {kp1_0.shape}, visible1 sum: {visible1.sum()}, nonvisibile: {d1.isfinite().sum() - visible1.sum()}")
+
+    mask_visible = visible0.unsqueeze(-1) & visible1.unsqueeze(-2)
+    print(f"mask_visible sum: {mask_visible.sum()}")
+
+    # build distance matrices
+    dist0 = torch.sum((kp0_1.unsqueeze(-2) - kp1.unsqueeze(-3)) ** 2, -1)
+    dist1 = torch.sum((kp0.unsqueeze(-2) - kp1_0.unsqueeze(-3)) ** 2, -1)
+    dist = torch.max(dist0, dist1)
+    inf = dist.new_tensor(float("inf"))
+    dist = torch.where(mask_visible, dist, inf)
+    print(f"Distance matrix: min {dist.min().item()}, max {dist.max().item()}")
+    print(f"distances: \n {dist}")
+
+    min0 = dist.min(-1).indices
+    min1 = dist.min(-2).indices
+    print(f"min0 shape: {min0.shape}, min1 shape: {min1.shape}")
+    print(f"min0 min: {min0.min().item()}, max: {min0.max().item()}")
+
+    ismin0 = torch.zeros(dist.shape, dtype=torch.bool, device=dist.device)
+    ismin1 = ismin0.clone()
+    ismin0.scatter_(-1, min0.unsqueeze(-1), value=1)
+    ismin1.scatter_(-2, min1.unsqueeze(-2), value=1)
+    positive2 = ismin0 & ismin1 & (dist < pos_th**2)
+    print(f"True Positive matches: {positive2.sum()}")
+    positive = ismin0 & ismin1 
+    print(f"Positive matches A: {positive.sum()}")
+    print(f"pos_th: {pos_th}")
+    print(f"dist valid sum: {(dist < pos_th**2).sum()}")
+    positive = ismin0 & ismin1 & (dist < pos_th**2)
+    print(f"Positive matches B: {positive.sum()}")
+
+    negative0 = (dist0.min(-1).values > neg_th**2) & valid0
+    negative1 = (dist1.min(-2).values > neg_th**2) & valid1
+    print(f"Negative0 sum: {negative0.sum()}, Negative1 sum: {negative1.sum()}")
+
+    unmatched = min0.new_tensor(UNMATCHED_FEATURE)
+    ignore = min0.new_tensor(IGNORE_FEATURE)
+    m0 = torch.where(positive.any(-1), min0, ignore)
+    m1 = torch.where(positive.any(-2), min1, ignore)
+    m0 = torch.where(negative0, unmatched, m0)
+    m1 = torch.where(negative1, unmatched, m1)
+    print(f"m0: {m0.shape}, m1: {m1.shape}")
+    print(f"visibl0: {visible0.sum()}, visible1: {visible1.sum()}")
+
+    return {
+        "assignment": positive,
+        "matches0": m0,
+        "matches1": m1,
+        "visible0": visible0,
+        "visible1": visible1,
+    }
+
+
+
+@torch.no_grad()
+def gt_matches_from_pose_depth2(
     kp0, kp1, data, pos_th=3, neg_th=5, epi_th=None, cc_th=None, **kw
 ):
     if kp0.shape[1] == 0 or kp1.shape[1] == 0:

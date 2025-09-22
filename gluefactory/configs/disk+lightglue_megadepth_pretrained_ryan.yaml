@@ -13,8 +13,8 @@ data:
     num_overlap_bins: 3
     read_depth: true
     read_image: true
-    batch_size: 33 
-    num_workers: 14
+    batch_size: 12 
+    num_workers: 6
     load_features:
         do: true # enable this if you have cached predictions
         path: exports/megadepth-undist-depth-r1024_DISK-k2048-nms5/{scene}.h5
@@ -24,7 +24,7 @@ model:
     name: two_view_pipeline
     extractor:
         name: extractors.disk_kornia
-        max_num_keypoints: 512
+        max_num_keypoints: 2048 
         force_num_keypoints: True
         detection_threshold: 0.0
         trainable: False

@@ -205,6 +205,8 @@ def plot_matches(kpts0, kpts1, color=None, lw=1.5, ps=4, a=1.0, labels=None, axe
 
     if lw > 0:
         for i in range(len(kpts0)):
+            if i % 47 != 0:
+                continue 
             line = matplotlib.patches.ConnectionPatch(
                 xyA=(kpts0[i, 0], kpts0[i, 1]),
                 xyB=(kpts1[i, 0], kpts1[i, 1]),

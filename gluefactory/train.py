@@ -17,6 +17,7 @@ from pydoc import locate
 
 import numpy as np
 import torch
+import sys
 from omegaconf import OmegaConf
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
@@ -665,6 +666,7 @@ def training(rank, conf, output_dir, args):
                 or it == (len(train_loader) - 1)
             ):
                 with fork_rng(seed=conf.train.seed):
+                    print(f"doing rgsw eval!")
                     rgsw_results, rgsw_pr_metrics, rgsw_figures = do_evaluation(
                         model,
                         rgsw_loader,
@@ -674,6 +676,8 @@ def training(rank, conf, output_dir, args):
                         rank,
                         pbar=(rank == 0),
                     )
+                    print("done with rgsw eval!")
+                    #sys.exit(1)
                     results, pr_metrics, figures = do_evaluation(
                         model,
                         val_loader,

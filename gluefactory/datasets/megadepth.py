@@ -173,7 +173,11 @@ class _PairDataset(torch.utils.data.Dataset):
             assert num_neg is None
             assert self.conf.views == 2
             pairs_path = scene_lists_path / self.conf[split + "_pairs"]
+            count = 0
             for line in pairs_path.read_text().rstrip("\n").split("\n"):
+                if count >= 1:
+                    break
+                count += 1
                 im0, im1 = line.split(" ")
                 scene = im0.split("/")[0]
                 assert im1.split("/")[0] == scene

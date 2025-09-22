@@ -4,7 +4,7 @@ from torch.utils.data import Dataset, DataLoader
 from gluefactory.datasets.base_dataset import collate
 
 class RGSW(Dataset):
-    def __init__(self, num_samples=1, path='/usr/local/home/rsoussan/glue-factory/data/rgsw'):
+    def __init__(self, num_samples=2, path='/usr/local/home/rsoussan/glue-factory/data/rgsw'):
         self.num_samples = num_samples 
         self.path = path
 
