@@ -50,32 +50,68 @@ def nanmax(x, dim=None):
     x_clean = torch.nan_to_num(x, nan=float('-inf'))
     return torch.max(x_clean, dim=dim) 
 
-
-#@AMP_CUSTOM_FWD_F32
-def normalize_depths(depths: torch.Tensor) -> torch.Tensor:
+def standardized_log_depth(depth: torch.Tensor, clip_values: tuple = None, eps: float = 1e-8):
     """
-    Normalize depths (batch, count) to be centered and scaled to [-1, 1].
+    Standardize log depth values per batch while avoiding invalid values.
+    Invalid depths are marked as NaN. Optionally clip log depths before standardization.
 
     Args:
-        depths: Depths tensor with shape (batch, num).
+        depth: [B, N] tensor of depth values.
+        clip_values: Optional (min_val, max_val) tuple to clip log depth values before standardizing.
+        eps: Small value to avoid division by zero.
 
     Returns:
-        Normalized depths tensor (batch, num). 
+        log_depth: [B, N] standardized log depth with NaNs for invalid points.
     """
-    depth_range = nanmax(depths, dim=1).values - nanmin(depths, dim=1).values  
-    depth_range = depth_range.to(depths)
-    shift = (nanmax(depths, dim=1).values + nanmin(depths, dim=1).values) / 2  
-    shift = shift.to(depths)
+    # Compute log depth, avoiding nans and zeros 
+    valid_mask = torch.isfinite(depth) & (depth != 0.0)
+    masked_depth = torch.where(valid_mask, depth, torch.ones_like(depth))
+    log_depth_with_nans = torch.log(masked_depth)
+    # Add nans for invalid depths so these are ignored when calculating mean and stddev.
+    log_depth_with_nans[~valid_mask] = float('nan')
 
-    # Add last dimension of 1 so these can be broadcasted when compared to depths 
-    shift = shift.unsqueeze(1)
-    depth_range = depth_range.unsqueeze(1)  
+    # Optional clipping
+    if clip_values is not None:
+        log_depth_with_nans = torch.clamp(log_depth_with_nans, *clip_values)
 
-    normalized_depths = (depths - shift) / (depth_range / 2)
-    return normalized_depths
+    # Compute batch-wise mean and std ignoring nans 
+    mean = torch.nanmean(log_depth_with_nans, dim=1, keepdim=True)
+    std = torch.sqrt(torch.nanmean((log_depth_with_nans - mean)**2, dim=1, keepdim=True))
+
+    # Standardize 
+    log_depth = torch.zeros_like(depth)
+    log_depth = (log_depth_with_nans - mean) / (std + eps)
+    # Revert invalid values to 0.0 to avoid introducing nan values during backprop.
+    # These will be masked out and ignored later by the valid depth masks.
+    log_depth[~valid_mask] = 0.0
+
+    return log_depth
+
+#@AMP_CUSTOM_FWD_F32
+#def normalize_depths(depths: torch.Tensor) -> torch.Tensor:
+#    """
+#    Normalize depths (batch, count) to be centered and scaled to [-1, 1].
+#
+#    Args:
+#        depths: Depths tensor with shape (batch, num).
+#
+#    Returns:
+#        Normalized depths tensor (batch, num). 
+#    """
+#    depth_range = nanmax(depths, dim=1).values - nanmin(depths, dim=1).values  
+#    depth_range = depth_range.to(depths)
+#    shift = (nanmax(depths, dim=1).values + nanmin(depths, dim=1).values) / 2  
+#    shift = shift.to(depths)
+#
+#    # Add last dimension of 1 so these can be broadcasted when compared to depths 
+#    shift = shift.unsqueeze(1)
+#    depth_range = depth_range.unsqueeze(1)  
+#
+#    normalized_depths = (depths - shift) / (depth_range / 2)
+#    return normalized_depths
 
 def valid_mask(depth: torch.Tensor) -> torch.BoolTensor:
-    mask_1d = ~torch.isnan(depth)  # (batch, num)
+    mask_1d = torch.isfinite(depth) & (depth != 0.0)  # (batch, num)
     mask_2d = mask_1d.unsqueeze(2) & mask_1d.unsqueeze(1)  # (batch, num, num)
     # Expand mask for num_heads as expected in transformer layer
     mask_2d = mask_2d.unsqueeze(1)
@@ -612,24 +648,16 @@ class LightGlue(nn.Module):
         self.overlap = data['overlap_0to1']
         self.percent_invalid_depth0 = 100.0 * (~torch.isfinite(depth0)).sum(dim=1) / depth0.size(1) 
         self.percent_invalid_depth1 = 100.0 * (~torch.isfinite(depth1)).sum(dim=1) / depth1.size(1) 
-        #print(f"pre normalize NaN percentage: {100.0 * torch.isnan(depth0).sum().item() / depth0.numel():.2f}%") 
-        depth0 = normalize_depths(depth0).clone()
-        #print(f"post normalize NaN percentage: {100.0 * torch.isnan(depth0).sum().item() / depth0.numel():.2f}%") 
-
-        #print(f"pre normalize d1 NaN percentage: {100.0 * torch.isnan(depth1).sum().item() / depth1.numel():.2f}%") 
-        depth1 = normalize_depths(depth1).clone()
-        #print(f"post normalize d1 NaN percentage: {100.0 * torch.isnan(depth1).sum().item() / depth1.numel():.2f}%") 
-        # TODO: test filling training data depths w/ nearest valid neighbors?
         mask0 = valid_mask(depth0)
         mask1 = valid_mask(depth1)
-        # Mark any depth nans as 0 so nans don't propogate during optimization. 
-        # Invalid depths are ignored later as masks are applied to attention calculation to zero out 
-        # contributions from keypoints with invalid depths
-        depth0 = depth0.nan_to_num(0)
-        depth1 = depth1.nan_to_num(0)
+
+        # Convert to standardized, log depth coordinates 
+        depth0 = standardized_log_depth(depth0).clone()
+        depth1 = standardized_log_depth(depth1).clone()
         # Add trailing dimenion of 1 for depth values
         depth0 = depth0.unsqueeze(-1)
         depth1 = depth1.unsqueeze(-1)
+
         b, m, _ = kpts0.shape
         b, n, _ = kpts1.shape
         device = kpts0.device
