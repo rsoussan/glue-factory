@@ -20,6 +20,9 @@ data:
         path: exports/megadepth-undist-depth-r1024_DISK-k2048-nms5/{scene}.h5
         padding_length: 2048
         padding_fn: pad_local_features
+    add_depth_noise:
+        do: true # enable this to add depth noise during training
+        percent: 0.1
 model:
     name: two_view_pipeline
     extractor:

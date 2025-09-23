@@ -32,6 +32,10 @@ def sample_n(data, num, seed=None):
     else:
         return data
 
+def add_depth_noise(depth_keypoints, percent):
+    noise_std = depth_keypoints * percent
+    noise = torch.randn_like(depth_keypoints) * noise_std
+    depth_keypoints += noise
 
 class MegaDepth(BaseDataset):
     default_conf = {
@@ -72,6 +76,11 @@ class MegaDepth(BaseDataset):
             **CacheLoader.default_conf,
             "collate": False,
         },
+        # Optionally add depth noise during training
+        "add_depth_noise": {
+            "do": False, 
+            "percent": 0.1, 
+        }
     }
 
     def _init(self, conf):
@@ -278,6 +287,7 @@ class _PairDataset(torch.utils.data.Dataset):
 
         # add random rotations
         do_rotate = self.conf.p_rotate > 0.0 and self.split == "train"
+        # TODO: this should also rotate depth keypoints! Is it rotating keypoints? Is this doing anything if save features ahead of time?
         if do_rotate:
             p = self.conf.p_rotate
             k = 0
@@ -326,6 +336,9 @@ class _PairDataset(torch.utils.data.Dataset):
                 features["keypoints"] = kpts
 
             data = {"cache": features, **data}
+        if self.split == "train" and self.conf.add_depth_noise.do:
+            add_depth_noise(data['cache']['depth_keypoints'], self.conf.add_depth_noise.percent)
+ 
         return data
 
     def __getitem__(self, idx):
