@@ -1,11 +1,12 @@
 import torch
+import glob 
 import os
 from torch.utils.data import Dataset, DataLoader
 from gluefactory.datasets.base_dataset import collate
 
 class RGSW(Dataset):
-    def __init__(self, num_samples=1, path='/usr/local/home/rsoussan/glue-factory/data/rgsw'):
-        self.num_samples = num_samples 
+    def __init__(self, path='/usr/local/home/rsoussan/glue-factory/data/rgsw'):
+        self.num_samples = len(glob.glob(os.path.join(path, 'rgsw_data*.pt'))) 
         self.path = path
 
     def __len__(self):
