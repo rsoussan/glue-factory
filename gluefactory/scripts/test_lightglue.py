@@ -1,9 +1,7 @@
 import argparse
-from disk import DISK
-from utils import load_image, rbd
 from torchvision.utils import save_image
-import viz2d
 import torch
+from tqdm import tqdm
 import sys
 import random
 import numpy as np
@@ -12,6 +10,9 @@ from pathlib import Path
 from torch.nn.modules.utils import consume_prefix_in_state_dict_if_present
 from gluefactory.models.matchers.lightglue import LightGlue
 from gluefactory.geometry.depth import sample_depth
+from gluefactory.datasets.custom_data import CustomData 
+from gluefactory.utils.tensor import batch_to_device
+from gluefactory.visualization.tools import plot_matches
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_pdf import PdfPages
 
@@ -147,7 +148,7 @@ def plot_images(imgs, titles=None, cmaps="gray", ax=None):
     return ax
 
 
-def main(input_dir):
+def main(test_dir, checkpoint):
     # Inits
     seed = 42
     torch.cuda.manual_seed_all(seed)
@@ -155,46 +156,19 @@ def main(input_dir):
     torch.set_grad_enabled(False)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    # Setup extractor and matcher
-    extractor = DISK(max_num_keypoints=2048).eval().to(device)
+    # Setup matcher
     conf = LightGlue.default_conf
     conf["input_dim"] = 128
     conf["filter_threshold"] = 0
-    conf["weights"] = "/usr/local/home/rsoussan/glue-factory/outputs/training/bartlett/ryan_tmp_disk+lg_megadepth/checkpoint_best.pth"
+    conf["weights"] = checkpoint 
     matcher = LightGlue(conf).eval().to(device)
 
-    input_dir = Path(input_dir)
-    subdirs = [d for d in input_dir.iterdir() if d.is_dir()]
     avg_valid_percents = []
+    loader = CustomData.get_dataloader(test_dir)
 
     with PdfPages("matches_report.pdf") as pdf:
-        for subdir in sorted(subdirs, key=lambda d: int(d.name)):
-            print(f"Processing {subdir}")
-
-            # Load data
-            image0 = load_image(str(subdir / "image0.png"))
-            image1 = load_image(str(subdir / "image1.png"))
-            depth0 = torch.load(str(subdir / "depth0.pt"))
-            depth1 = torch.load(str(subdir / "depth1.pt"))
-
-            feats0 = extractor.extract(image0.to(device))
-            feats1 = extractor.extract(image1.to(device))
-
-            data = {
-                "keypoints0": feats0["keypoints"],
-                "keypoints1": feats1["keypoints"],
-                "descriptors0": feats0["descriptors"],
-                "descriptors1": feats1["descriptors"],
-            }
-            data["depth_keypoints0"] = get_kp_depth(data["keypoints0"], depth0.to(device))
-            data["depth_keypoints1"] = get_kp_depth(data["keypoints1"], depth1.to(device))
-            data["overlap_0to1"] = 0.3
-
-            w = h = image0.shape[1]
-            data["view0"] = {"image_size": [w, h], "image": image0}
-            data["view1"] = {"image_size": [w, h], "image": image1}
-
-            # Predict
+        for i, data in enumerate(tqdm(loader, desc="Testing", ascii=True)):
+            data = batch_to_device(data, device, non_blocking=True)
             pred = matcher(data)
             matches = pred["matches"][0]
             scores = pred["scores"][0]
@@ -222,9 +196,9 @@ def main(input_dir):
             plot_images([img0, img1], ax=axes[0])
             if len(valid_matches) > 0:
                 m_kpts0, m_kpts1 = kpts0[valid_matches[..., 0]], kpts1[valid_matches[..., 1]]
-                viz2d.plot_matches(m_kpts0, m_kpts1, axes=(axes[0][0], axes[0][1]), color="lime", lw=0.2)
-            axes[0][0].set_title(f"{subdir.name} –Threshold: {match_threshold}")
-            axes[0][1].set_title(f"{subdir.name} – Image1 (Valid Matches: {len(valid_matches)})")
+                plot_matches(m_kpts0, m_kpts1, axes=(axes[0][0], axes[0][1]), color="lime", lw=0.2)
+            axes[0][0].set_title(f"{i} –Threshold: {match_threshold}")
+            axes[0][1].set_title(f"{i} – Image1 (Valid Matches: {len(valid_matches)})")
 
             # Images 
             plot_images([img0, img1], ax=axes[1])
@@ -237,9 +211,9 @@ def main(input_dir):
             plot_images([img0, img1], ax=axes[0])
             if len(invalid_matches) > 0:
                 m_kpts0, m_kpts1 = kpts0[invalid_matches[..., 0]], kpts1[invalid_matches[..., 1]]
-                viz2d.plot_matches(m_kpts0, m_kpts1, axes=(axes[0][0], axes[0][1]), color="lime", lw=0.2)
-            axes[0][0].set_title(f"{subdir.name} –Threshold: {match_threshold}")
-            axes[0][1].set_title(f"{subdir.name} – Image1 Invalid Matches: {len(invalid_matches)})")
+                plot_matches(m_kpts0, m_kpts1, axes=(axes[0][0], axes[0][1]), color="lime", lw=0.2)
+            axes[0][0].set_title(f"{i} –Threshold: {match_threshold}")
+            axes[0][1].set_title(f"{i} – Image1 Invalid Matches: {len(invalid_matches)})")
 
             # Images 
             plot_images([img0, img1], ax=axes[1])
@@ -255,13 +229,14 @@ def main(input_dir):
         ax.set_xticks(np.arange(0, 110, 10))
         ax.set_xlabel("Average Valid Match % (binned by 10%)")
         ax.set_ylabel("Frequency")
-        ax.set_title("Histogram of Avg Valid Match % Across Subdirectories")
+        ax.set_title("Histogram of Avg Valid Match % Across Tests")
         pdf.savefig(fig)
         plt.close(fig)
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("input_dir", help="Path to input directory containing subfolders")
+    parser.add_argument("test_data", help="Path to test data")
+    parser.add_argument("checkpoint", help="Path to checkpoint file (.pth)")
     args = parser.parse_args()
-    main(args.input_dir)
+    main(args.test_data, args.checkpoint)
