@@ -664,6 +664,12 @@ class LightGlue(nn.Module):
         if "view0" in data.keys() and "view1" in data.keys():
             size0 = data["view0"].get("image_size")
             size1 = data["view1"].get("image_size")
+
+        # Normalize keypoints to account for intrinsics
+        camera0, camera1 = data['view0']['camera'], data['view1']['camera']
+        kpts0 = camera0.normalize(kpts0)
+        kpts1 = camera1.normalize(kpts1)
+
         kpts0 = normalize_keypoints(kpts0, size0).clone()
         kpts1 = normalize_keypoints(kpts1, size1).clone()
 
