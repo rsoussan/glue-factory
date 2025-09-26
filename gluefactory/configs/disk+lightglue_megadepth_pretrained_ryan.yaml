@@ -57,7 +57,7 @@ train:
         exp_div_10: 10
     dataset_callback_fn: sample_new_items
     plot: [5, 'gluefactory.visualization.visualize_batch.make_match_figures']
-    lr_scaling: [[10, ['Wr3d']]]
+    lr_scaling: [[10, ['Wr3d', 'skew_params']]]
 benchmarks:
     megadepth1500:
         data:
