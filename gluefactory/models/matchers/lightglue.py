@@ -1,6 +1,6 @@
 import warnings
 from pathlib import Path
-from typing import Callable, List, Optional
+from typing import Callable, List, Optional, Tuple
 
 import numpy as np
 import torch
@@ -91,27 +91,59 @@ def rotate_half(x: torch.Tensor) -> torch.Tensor:
     x1, x2 = x.unbind(dim=-1)
     return torch.stack((-x2, x1), dim=-1).flatten(start_dim=-2)
 
-def apply_cached_rotary_emb(freqs: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
-    return (t * freqs[0]) + (rotate_half(t) * freqs[1])
+def apply_cached_rotary_emb(freqs_and_P: Tuple[torch.Tensor, torch.Tensor], t: torch.Tensor) -> torch.Tensor:
+    freqs, P = freqs_and_P
+    # We multiply by P.T because t is treated as a batch of row vectors.
+    # The transformation for a row vector v is v * P^T.
+    t_transformed = torch.matmul(t, P.T)
+    return (t_transformed * freqs[0]) + (rotate_half(t_transformed) * freqs[1])
 
 
 class LearnableFourierPositionalEncoding(nn.Module):
-    def __init__(self, dim: int, F_dim: int = None, gamma: float = 1.0, use_3d: bool = True):
+    def __init__(self, dim: int, F_dim: int = None, gamma: float = 1.0):
         super().__init__()
         F_dim = F_dim if F_dim is not None else dim
+        self.F_dim = F_dim
         self.gamma = gamma
-        self.use_3d = use_3d
 
         # Always create the 2D weights
         self.Wr2d = nn.Linear(2, F_dim // 2, bias=False)
         nn.init.normal_(self.Wr2d.weight.data, mean=0, std=self.gamma**-2)
 
         # Optional 3rd dimension weights
-        if self.use_3d:
+        if dim == 3:
             self.Wr3d = nn.Linear(1, F_dim // 2, bias=False)
             nn.init.normal_(self.Wr3d.weight.data, mean=0, std=self.gamma**-2)
         else:
             self.Wr3d = None
+
+        # Learnable parameters for the skew-symmetric matrix S.
+        # We only need to learn the upper triangular part (excluding the diagonal).
+        # TODO: make this optional???
+        num_off_diagonal = F_dim * (F_dim - 1) // 2
+        self.skew_params = nn.Parameter(torch.empty(num_off_diagonal))
+        nn.init.normal_(self.skew_params, mean=0, std=self.gamma**-2)
+
+    def _build_P(self) -> torch.Tensor:
+        """
+        Constructs the orthogonal matrix P from s_params using a linear solver.
+        This method is more numerically stable than direct inversion.
+        """
+        S = torch.zeros(self.F_dim, self.F_dim, device=self.skew_params.device)
+        
+        # Fill the upper triangular part and create the skew-symmetric matrix
+        triu_indices = torch.triu_indices(self.F_dim, self.F_dim, offset=1)
+        S[triu_indices[0], triu_indices[1]] = self.skew_params
+        S = S - S.T
+
+        I = torch.eye(self.F_dim, device=S.device)
+        
+        # Solve the linear system (I + S)P = (I - S) for P.
+        # This is equivalent to P = (I + S)^-1 * (I - S)
+        P = torch.linalg.solve(I + S, I - S)
+        
+        return P
+    
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -122,7 +154,8 @@ class LearnableFourierPositionalEncoding(nn.Module):
             out = out + self.Wr3d(x[..., 2:])
         cosines, sines = torch.cos(out), torch.sin(out)
         emb = torch.stack([cosines, sines], 0).unsqueeze(-3)
-        return emb.repeat_interleave(2, dim=-1)
+        P = self._build_P()
+        return emb.repeat_interleave(2, dim=-1), P
 
 #class LearnableFourierPositionalEncoding(nn.Module):
 #    def __init__(self, M: int, dim: int, F_dim: int = None, gamma: float = 1.0) -> None:
