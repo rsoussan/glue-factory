@@ -26,6 +26,10 @@ iteration = 0
 #    else torch.cuda.amp.custom_fwd(cast_inputs=torch.float32)
 #)
 
+def merge_kpts_and_depth(kpts: torch.Tensor, depth: torch.Tensor):
+    # Concatenate along last dimension -> [B, N, 3]
+    kpts_with_depth = torch.cat([kpts, depth], dim=-1)
+    return kpts_with_depth
 
 #@AMP_CUSTOM_FWD_F32
 def normalize_keypoints(
@@ -50,65 +54,28 @@ def nanmax(x, dim=None):
     x_clean = torch.nan_to_num(x, nan=float('-inf'))
     return torch.max(x_clean, dim=dim) 
 
-def standardized_log_depth(depth: torch.Tensor, clip_values: tuple = None, eps: float = 1e-8):
+#@AMP_CUSTOM_FWD_F32
+def normalize_depths(depths: torch.Tensor) -> torch.Tensor:
     """
-    Standardize log depth values per batch while avoiding invalid values.
-    Invalid depths are marked as NaN. Optionally clip log depths before standardization.
+    Normalize depths (batch, count) to be centered and scaled to [-1, 1].
 
     Args:
-        depth: [B, N] tensor of depth values.
-        clip_values: Optional (min_val, max_val) tuple to clip log depth values before standardizing.
-        eps: Small value to avoid division by zero.
+        depths: Depths tensor with shape (batch, num).
 
     Returns:
-        log_depth: [B, N] standardized log depth with NaNs for invalid points.
+        Normalized depths tensor (batch, num). 
     """
-    # Compute log depth, avoiding nans and zeros 
-    valid_mask = torch.isfinite(depth) & (depth != 0.0)
-    masked_depth = torch.where(valid_mask, depth, torch.ones_like(depth))
-    log_depth_with_nans = torch.log(masked_depth)
-    # Add nans for invalid depths so these are ignored when calculating mean and stddev.
-    log_depth_with_nans[~valid_mask] = float('nan')
+    depth_range = nanmax(depths, dim=1).values - nanmin(depths, dim=1).values  
+    depth_range = depth_range.to(depths)
+    shift = (nanmax(depths, dim=1).values + nanmin(depths, dim=1).values) / 2  
+    shift = shift.to(depths)
 
-    # Optional clipping
-    if clip_values is not None:
-        log_depth_with_nans = torch.clamp(log_depth_with_nans, *clip_values)
+    # Add last dimension of 1 so these can be broadcasted when compared to depths 
+    shift = shift.unsqueeze(1)
+    depth_range = depth_range.unsqueeze(1)  
 
-    # Compute batch-wise mean and std ignoring nans 
-    mean = torch.nanmean(log_depth_with_nans, dim=1, keepdim=True)
-    std = torch.sqrt(torch.nanmean((log_depth_with_nans - mean)**2, dim=1, keepdim=True))
-
-    # Standardize 
-    log_depth = torch.zeros_like(depth)
-    log_depth = (log_depth_with_nans - mean) / (std + eps)
-    # Revert invalid values to 0.0 to avoid introducing nan values during backprop.
-    # These will be masked out and ignored later by the valid depth masks.
-    log_depth[~valid_mask] = 0.0
-
-    return log_depth
-
-#@AMP_CUSTOM_FWD_F32
-#def normalize_depths(depths: torch.Tensor) -> torch.Tensor:
-#    """
-#    Normalize depths (batch, count) to be centered and scaled to [-1, 1].
-#
-#    Args:
-#        depths: Depths tensor with shape (batch, num).
-#
-#    Returns:
-#        Normalized depths tensor (batch, num). 
-#    """
-#    depth_range = nanmax(depths, dim=1).values - nanmin(depths, dim=1).values  
-#    depth_range = depth_range.to(depths)
-#    shift = (nanmax(depths, dim=1).values + nanmin(depths, dim=1).values) / 2  
-#    shift = shift.to(depths)
-#
-#    # Add last dimension of 1 so these can be broadcasted when compared to depths 
-#    shift = shift.unsqueeze(1)
-#    depth_range = depth_range.unsqueeze(1)  
-#
-#    normalized_depths = (depths - shift) / (depth_range / 2)
-#    return normalized_depths
+    normalized_depths = (depths - shift) / (depth_range / 2)
+    return normalized_depths
 
 def valid_mask(depth: torch.Tensor) -> torch.BoolTensor:
     mask_1d = torch.isfinite(depth) & (depth != 0.0)  # (batch, num)
@@ -127,7 +94,52 @@ def rotate_half(x: torch.Tensor) -> torch.Tensor:
 def apply_cached_rotary_emb(freqs: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
     return (t * freqs[0]) + (rotate_half(t) * freqs[1])
 
+
 class LearnableFourierPositionalEncoding(nn.Module):
+    def __init__(self, dim: int, F_dim: int = None, gamma: float = 1.0, use_3d: bool = True):
+        super().__init__()
+        F_dim = F_dim if F_dim is not None else dim
+        self.gamma = gamma
+        self.use_3d = use_3d
+
+        # Always create the 2D weights
+        self.Wr2d = nn.Linear(2, F_dim // 2, bias=False)
+        nn.init.normal_(self.Wr2d.weight.data, mean=0, std=self.gamma**-2)
+
+        # Optional 3rd dimension weights
+        if self.use_3d:
+            self.Wr3d = nn.Linear(1, F_dim // 2, bias=False)
+            nn.init.normal_(self.Wr3d.weight.data, mean=0, std=self.gamma**-2)
+        else:
+            self.Wr3d = None
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        x: [..., 2] or [..., 3]
+        """
+        out = self.Wr2d(x[..., :2])
+        if self.Wr3d is not None and x.size(-1) == 3:
+            out = out + self.Wr3d(x[..., 2:])
+        cosines, sines = torch.cos(out), torch.sin(out)
+        emb = torch.stack([cosines, sines], 0).unsqueeze(-3)
+        return emb.repeat_interleave(2, dim=-1)
+
+#class LearnableFourierPositionalEncoding(nn.Module):
+#    def __init__(self, M: int, dim: int, F_dim: int = None, gamma: float = 1.0) -> None:
+#        super().__init__()
+#        F_dim = F_dim if F_dim is not None else dim
+#        self.gamma = gamma
+#        self.Wr = nn.Linear(M, F_dim // 2, bias=False)
+#        nn.init.normal_(self.Wr.weight.data, mean=0, std=self.gamma**-2)
+#
+#    def forward(self, x: torch.Tensor) -> torch.Tensor:
+#        """encode position vector"""
+#        projected = self.Wr(x)
+#        cosines, sines = torch.cos(projected), torch.sin(projected)
+#        emb = torch.stack([cosines, sines], 0).unsqueeze(-3)
+#        return emb.repeat_interleave(2, dim=-1)
+
+class LearnableStringEncoding(nn.Module):
     def __init__(self, M: int, dim: int, F_dim: int = None, gamma: float = 1.0) -> None:
         super().__init__()
         F_dim = F_dim if F_dim is not None else dim
@@ -141,6 +153,9 @@ class LearnableFourierPositionalEncoding(nn.Module):
         cosines, sines = torch.cos(projected), torch.sin(projected)
         emb = torch.stack([cosines, sines], 0).unsqueeze(-3)
         return emb.repeat_interleave(2, dim=-1)
+
+
+
 
 
 class TokenConfidence(nn.Module):
@@ -249,7 +264,6 @@ class SelfBlock(nn.Module):
         self.Wqkv = nn.Linear(embed_dim, 3 * embed_dim, bias=bias)
         self.inner_attn = Attention(flash)
         self.out_proj = nn.Linear(embed_dim, embed_dim, bias=bias)
-        self.depth_out_proj = nn.Linear(embed_dim, embed_dim, bias=bias)
         self.ffn = nn.Sequential(
             nn.Linear(2 * embed_dim, 2 * embed_dim),
             nn.LayerNorm(2 * embed_dim, elementwise_affine=True),
@@ -261,7 +275,6 @@ class SelfBlock(nn.Module):
         self,
         x: torch.Tensor,
         encoding: torch.Tensor,
-        depth_encoding: torch.Tensor,
         mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         qkv = self.Wqkv(x)
@@ -277,27 +290,6 @@ class SelfBlock(nn.Module):
         context = self.inner_attn(q, k, v, mask=mask)
         message = self.out_proj(context.transpose(1, 2).flatten(start_dim=-2))
 
-        # Add depth information
-        # TODO: generate different qkv for depth? (prob not, not done in lfm3d..)
-        depth_q = apply_cached_rotary_emb(depth_encoding, q)
-        depth_k = apply_cached_rotary_emb(depth_encoding, k)
-        depth_context = self.inner_attn(depth_q, depth_k, v, mask=mask)
-        depth_message = self.depth_out_proj(depth_context.transpose(1, 2).flatten(start_dim=-2))
-        #print("depth message")
-        #print(depth_message.shape)
-        #print(f"[DBG] depth_message min={depth_message.min().item():.3e} max={depth_message.max().item():.3e}")
-        #print(depth_message)
-        #print("message pre")
-        #print(message.shape)
-        #print(message)
-        #print(f"depth message NaN percentage: {100.0 * torch.isnan(depth_message).sum().item() / depth_message.numel():.2f}%") 
-        # TODO: use a network to fuse this? don't use depth_out_proj? pros and cons?
-        message = message + depth_message
-        #print("message post")
-        #print(message_2.shape)
-        #print(message_2)
-        #print(f"NaN percentage: {100.0 * torch.isnan(depth).sum().item() / depth.numel():.2f}%") 
-        # TODO: include depth here!
         return x + self.ffn(torch.cat([x, message], -1))
 
 def debug_attention_mask(sim: torch.Tensor, mask: torch.Tensor = None):
@@ -451,26 +443,24 @@ class TransformerLayer(nn.Module):
         desc1,
         encoding0,
         encoding1,
-        depth_encoding0,
-        depth_encoding1,
         mask0: Optional[torch.Tensor] = None,
         mask1: Optional[torch.Tensor] = None,
     ):
         if mask0 is not None and mask1 is not None:
-            return self.masked_forward(desc0, desc1, encoding0, encoding1, depth_encoding0, depth_encoding1, mask0, mask1)
+            return self.masked_forward(desc0, desc1, encoding0, encoding1, mask0, mask1)
         else:
-            desc0 = self.self_attn(desc0, encoding0, depth_encoding0)
-            desc1 = self.self_attn(desc1, encoding1, depth_encoding1)
+            desc0 = self.self_attn(desc0, encoding0)
+            desc1 = self.self_attn(desc1, encoding1)
             return self.cross_attn(desc0, desc1)
 
     # This part is compiled and allows padding inputs
-    def masked_forward(self, desc0, desc1, encoding0, encoding1, depth_encoding0, depth_encoding1, mask0, mask1):
+    def masked_forward(self, desc0, desc1, encoding0, encoding1, mask0, mask1):
         mask = mask0 & mask1.transpose(-1, -2)
         mask0 = mask0 & mask0.transpose(-1, -2)
         mask1 = mask1 & mask1.transpose(-1, -2)
         #print("masked forward!")
-        desc0 = self.self_attn(desc0, encoding0, depth_encoding0, mask0)
-        desc1 = self.self_attn(desc1, encoding1, depth_encoding1, mask1)
+        desc0 = self.self_attn(desc0, encoding0, mask0)
+        desc1 = self.self_attn(desc1, encoding1, mask1)
         return self.cross_attn(desc0, desc1, mask)
 
 
@@ -569,11 +559,7 @@ class LightGlue(nn.Module):
 
         head_dim = conf.descriptor_dim // conf.num_heads
         self.posenc = LearnableFourierPositionalEncoding(
-            2 + 2 * conf.add_scale_ori, head_dim, head_dim
-        )
-        # Doesn't support adding scale ori
-        self.depthenc = LearnableFourierPositionalEncoding(
-            1, head_dim, head_dim
+            3, head_dim, head_dim
         )
 
         h, n, d = conf.num_heads, conf.n_layers, conf.descriptor_dim
@@ -619,6 +605,13 @@ class LightGlue(nn.Module):
                 state_dict = {k.replace(*pattern): v for k, v in state_dict.items()}
                 pattern = f"cross_attn.{i}", f"transformers.{i}.cross_attn"
                 state_dict = {k.replace(*pattern): v for k, v in state_dict.items()}
+            # Check for posenc 3d weights, randomly initialize if boostrapping from 2d only
+            if self.posenc.Wr3d is not None:
+                has_posenc_3d = any("posenc.Wr3d" in k for k in state_dict)
+                if has_posenc_3d: 
+                    print("Found 3D weights in checkpoint, using these.")
+                else:
+                    print("No 3D weights in checkpoint, initializing Wr3d randomly.")
             self.load_state_dict(state_dict, strict=False)
 
         self.register_buffer(
@@ -651,12 +644,17 @@ class LightGlue(nn.Module):
         mask0 = valid_mask(depth0)
         mask1 = valid_mask(depth1)
 
-        # Convert to standardized, log depth coordinates 
-        depth0 = standardized_log_depth(depth0).clone()
-        depth1 = standardized_log_depth(depth1).clone()
+        # Normalize depth coordinates 
+        depth0 = normalize_depths(depth0).clone()
+        depth1 = normalize_depths(depth1).clone()
         # Add trailing dimenion of 1 for depth values
         depth0 = depth0.unsqueeze(-1)
         depth1 = depth1.unsqueeze(-1)
+        # Mark any depth nans as 0 so nans don't propogate during optimization. 
+        # Invalid depths are ignored later as masks are applied to attention calculation to zero out 
+        # contributions from keypoints with invalid depths
+        depth0 = depth0.nan_to_num(0)
+        depth1 = depth1.nan_to_num(0)
 
         b, m, _ = kpts0.shape
         b, n, _ = kpts1.shape
@@ -664,11 +662,6 @@ class LightGlue(nn.Module):
         if "view0" in data.keys() and "view1" in data.keys():
             size0 = data["view0"].get("image_size")
             size1 = data["view1"].get("image_size")
-
-        # Normalize keypoints to account for intrinsics
-        camera0, camera1 = data['view0']['camera'], data['view1']['camera']
-        kpts0 = camera0.normalize(kpts0)
-        kpts1 = camera1.normalize(kpts1)
 
         kpts0 = normalize_keypoints(kpts0, size0).clone()
         kpts1 = normalize_keypoints(kpts1, size1).clone()
@@ -703,14 +696,11 @@ class LightGlue(nn.Module):
             desc1 = desc1.half()
         desc0 = self.input_proj(desc0)
         desc1 = self.input_proj(desc1)
-        # cache positional embeddings
-        encoding0 = self.posenc(kpts0)
-        encoding1 = self.posenc(kpts1)
-        # cache depth embeddings
-        #print(f"pre depth enc NaN percentage: {100.0 * torch.isnan(depth0).sum().item() / depth0.numel():.2f}%") 
-        depth_encoding0 = self.depthenc(depth0)
-        #print(f"post depth enc NaN percentage: {100.0 * torch.isnan(depth0).sum().item() / depth0.numel():.2f}%") 
-        depth_encoding1 = self.depthenc(depth1)
+        # cache position + depth embeddings
+        kpts_with_depth0 = merge_kpts_and_depth(kpts0, depth0)
+        kpts_with_depth1 = merge_kpts_and_depth(kpts1, depth1)
+        encoding0 = self.posenc(kpts_with_depth0)
+        encoding1 = self.posenc(kpts_with_depth1)
 
         # GNN + final_proj + assignment
         do_early_stop = self.conf.depth_confidence > 0 and not self.training
@@ -733,14 +723,12 @@ class LightGlue(nn.Module):
                     desc1,
                     encoding0,
                     encoding1,
-                    depth_encoding0, 
-                    depth_encoding1, 
                     mask0, 
                     mask1,
                     use_reentrant=False,  # Recommended by torch, default was True
                 )
             else:
-                desc0, desc1 = self.transformers[i](desc0, desc1, encoding0, encoding1, depth_encoding0, depth_encoding1, mask0, mask1)
+                desc0, desc1 = self.transformers[i](desc0, desc1, encoding0, encoding1, mask0, mask1)
             if self.training or i == self.conf.n_layers - 1:
                 all_desc0.append(desc0)
                 all_desc1.append(desc1)
