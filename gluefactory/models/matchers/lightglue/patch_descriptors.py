@@ -102,6 +102,119 @@ def filter_bottom_percent_keypoints(keypoints, bottom_percent):
     filtered_keypoints = [kp for kp in keypoints if kp.response > threshold]
     return filtered_keypoints
 
+def filter_keypoints_near_warped_boundary(
+    keypoints,
+    descriptors, 
+    scores,
+    H,
+    patch_size,
+    border_thresh=5,
+    warped_patch=None,
+    black_thresh=5,
+    smooth_border=False,
+    convex_fit=True,
+    morph_kernel_size=5,
+    save_path=None,
+    draw_keypoints=False,
+):
+    """
+    Removes keypoints near the visible warped patch boundary,
+    tightening the border to exclude black edges and optionally smoothing it.
+
+    Args:
+        keypoints (list[cv2.KeyPoint]): Keypoints in warped frame.
+        H (np.ndarray): 3x3 homography from original patch → warped image.
+        patch_size (int): Original patch size.
+        border_thresh (float): Distance (pixels) from border to reject.
+        warped_patch (np.ndarray, optional): Warped patch image for analysis/drawing.
+        black_thresh (int): Intensity threshold for black pixels.
+        smooth_border (bool): Apply morphological smoothing to mask.
+        convex_fit (bool): Use convex hull to ensure no valid region is cut off.
+        morph_kernel_size (int): Kernel size for mask closing operation.
+        save_path (str, optional): Path to save debug visualization.
+        draw_keypoints (bool): Whether to draw kept/discarded keypoints.
+
+    Returns:
+        filtered_kpts (list[cv2.KeyPoint]): Keypoints kept after filtering.
+        tightened_poly (np.ndarray): Polygon (Nx1x2) of the tightened boundary.
+    """
+    # --- 1. Warp original patch corners ---
+    corners = np.array([
+        [0, 0, 1],
+        [patch_size - 1, 0, 1],
+        [patch_size - 1, patch_size - 1, 1],
+        [0, patch_size - 1, 1],
+    ]).T
+    warped_corners = H @ corners
+    warped_corners /= warped_corners[2, :]
+    warped_corners = warped_corners[:2, :].T.astype(np.float32)
+    warped_poly = warped_corners.reshape((-1, 1, 2))
+
+    tightened_poly = warped_poly  # fallback
+
+    if warped_patch is not None:
+        # --- 2. Compute valid mask (ignore black areas) ---
+        gray = cv2.cvtColor(warped_patch, cv2.COLOR_BGR2GRAY) if warped_patch.ndim == 3 else warped_patch
+        mask = (gray > black_thresh).astype(np.uint8) * 255
+
+        # --- 3. Optional smoothing ---
+        if smooth_border:
+            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (morph_kernel_size, morph_kernel_size))
+            mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+
+        # --- 4. Find the largest valid contour ---
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if contours:
+            largest_contour = max(contours, key=cv2.contourArea)
+
+            # --- 5. Fit convex or raw polygon ---
+            if convex_fit:
+                tightened_poly = cv2.convexHull(largest_contour)
+            else:
+                # Optional smoothing: approximate polygon with fewer vertices
+                epsilon = 0.005 * cv2.arcLength(largest_contour, True)
+                tightened_poly = cv2.approxPolyDP(largest_contour, epsilon, True)
+        else:
+            tightened_poly = warped_poly
+
+    # --- 6. Compute keypoint distances from tightened boundary ---
+    distances = np.array([
+        cv2.pointPolygonTest(tightened_poly, tuple(kp.pt), measureDist=True)
+        for kp in keypoints
+    ])
+
+    keep_mask = distances > border_thresh
+    filtered_kpts = [kp for kp, keep in zip(keypoints, keep_mask) if keep]
+    filtered_descriptors = descriptors[keep_mask]
+    filtered_scores = scores[keep_mask]
+    discarded_kpts = [kp for kp, keep in zip(keypoints, keep_mask) if not keep]
+
+    # --- 7. Visualization ---
+    if warped_patch is not None and save_path is not None:
+        vis = warped_patch.copy()
+        if vis.dtype != np.uint8:
+            vis = np.clip(vis * 255, 0, 255).astype(np.uint8)
+        if vis.ndim == 2:
+            vis = cv2.cvtColor(vis, cv2.COLOR_GRAY2BGR)
+
+        # Draw boundaries
+        cv2.polylines(vis, [np.int32(warped_poly)], True, (0, 0, 255), 2)  # red = original warped boundary
+        cv2.polylines(vis, [np.int32(tightened_poly)], True, (0, 255, 0), 2)  # green = tightened visible boundary
+
+        if draw_keypoints:
+            vis = cv2.drawKeypoints(
+                vis, filtered_kpts, None, (0, 255, 0),
+                flags=cv2.DRAW_MATCHES_FLAGS_DRAW_RICH_KEYPOINTS
+            )
+            vis = cv2.drawKeypoints(
+                vis, discarded_kpts, None, (0, 0, 255),
+                flags=cv2.DRAW_MATCHES_FLAGS_DRAW_RICH_KEYPOINTS
+            )
+
+        cv2.imwrite(save_path, vis)
+
+    return filtered_kpts, filtered_descriptors, filtered_scores
+
 # TODO: clean all this up! unify rgsw data output to match megadepth data output! remove conditional processing!!
 def load_data(data_path):
     if not os.path.exists(data_path):
@@ -438,9 +551,11 @@ def detect_features_and_unwarp(
     H,
     x,
     y,
+    patch_size, 
     unwarped_keypoints_all,
     descriptors_all, 
-    warped_keypoints
+    warped_keypoints,
+    filter_boundary_keypoints = True
 ):
     device="cuda" if torch.cuda.is_available() else "cpu"
     # Convert image to Torch format 
@@ -468,9 +583,6 @@ def detect_features_and_unwarp(
         }
         return [], np.zeros((0, descriptors.shape[1])), unwarped_pred
 
-    # Add new descriptors
-    descriptors_all.append(descriptors)
-
     # Save warped keypoints
     for i, (keypoint_x, keypoint_y) in enumerate(keypoints):
         keypoint = cv2.KeyPoint(
@@ -482,6 +594,13 @@ def detect_features_and_unwarp(
             octave=0
         )
         warped_keypoints.append(keypoint)
+
+    if filter_boundary_keypoints:
+        warped_keypoints, descriptors, scores = filter_keypoints_near_warped_boundary(warped_keypoints, descriptors, scores, H, patch_size, border_thresh=5, warped_patch=image, save_path=f"patch_keypoints_{x}_{y}.png", draw_keypoints=True)
+        keypoints = np.array([kp.pt for kp in warped_keypoints], dtype=np.float32)
+
+    # Add new descriptors
+    descriptors_all.append(descriptors)
 
     # Unwarp keypoints 
     H_inv = np.linalg.inv(H)
@@ -522,8 +641,8 @@ def detect_features_from_patches(rgb_img, normals, patch_warper):
     H, W = rgb_img.shape[:2]
     
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    feature_detector = DISK(max_num_keypoints=int(2048/(PATCH_SIZE_FACTOR*PATCH_SIZE_FACTOR))).eval().to(device) 
-    #feature_detector = SuperPoint(max_num_keypoints=int(2048/(PATCH_SIZE_FACTOR*PATCH_SIZE_FACTOR))).eval().to(device) 
+    #feature_detector = DISK(max_num_keypoints=int(2048/(PATCH_SIZE_FACTOR*PATCH_SIZE_FACTOR))).eval().to(device) 
+    feature_detector = SuperPoint(max_num_keypoints=int(2048/(PATCH_SIZE_FACTOR*PATCH_SIZE_FACTOR))).eval().to(device) 
     keypoints_all = []
     descriptors_all = []
     patches = []
@@ -545,6 +664,7 @@ def detect_features_from_patches(rgb_img, normals, patch_warper):
                 H,
                 x,
                 y,
+                patch_warper.patch_size, 
                 keypoints_all,
                 descriptors_all, 
                 warped_keypoints
@@ -777,7 +897,7 @@ if __name__ == "__main__":
     cv2.imwrite("warped_patches_mosaic_with_keypoints.png", warped_patches_mosaic_with_keypoints_image)
 
     # Save warped patches mosaic with filtered keypoints
-    warped_patches_mosaic_with_filtered_keypoints_image = create_warped_patches_mosaic_image(patches, h, w, draw_keypoints=True, filter_keypoints_bottom_percent=0.5)
+    warped_patches_mosaic_with_filtered_keypoints_image = create_warped_patches_mosaic_image(patches, h, w, draw_keypoints=True, filter_keypoints_bottom_percent=0.8)
     cv2.imwrite("warped_patches_mosaic_with_filtered_keypoints.png", warped_patches_mosaic_with_filtered_keypoints_image)
 
     # Save original vs warped patches mosaic
