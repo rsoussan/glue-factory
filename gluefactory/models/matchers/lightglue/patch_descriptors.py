@@ -290,7 +290,7 @@ def load_data(data_path, prefix='0'):
 #
     return rgb_img_np, depth_img_np, rgb_tensor_original, depth_tensor_processed, K
 
-def save_data(keypoints, descriptors, image_tensor, depth_tensor, feature_detector_name, filename):
+def save_data(keypoints, descriptors, image_tensor, depth_tensor, K, feature_detector_name, filename):
     kp_array = torch.tensor([kp.pt for kp in keypoints], dtype=torch.float32)
     desc_tensor = torch.tensor(descriptors, dtype=torch.float32)
     scores_tensor = torch.tensor([kp.response for kp in keypoints], dtype=torch.float32)
@@ -300,7 +300,8 @@ def save_data(keypoints, descriptors, image_tensor, depth_tensor, feature_detect
         "scores": scores_tensor,
         "image": image_tensor, 
         "depth": depth_tensor, 
-        "features": feature_detector_name
+        "features": feature_detector_name,
+        "intrinsics": K 
     }, filename)
 
 def rotation_matrix_from_vectors(vec1, vec2):
@@ -891,7 +892,7 @@ if __name__ == "__main__":
     normals = get_normals(depth_image, K, device)
     patch_warper = PatchWarper(K, PATCH_SIZE, PATCH_SIZE_FACTOR, MAX_WARPED_DIM_MULTIPLIER, BORDER_MODE, args.fixed_pitch)
     keypoints, descriptors, patches = detect_features_from_patches(rgb_image, normals, patch_warper, args.feature_detector)
-    save_data(keypoints, descriptors, rgb_tensor, depth_tensor, args.feature_detector, f"features_{args.data_prefix}.pt")
+    save_data(keypoints, descriptors, rgb_tensor, depth_tensor, K, args.feature_detector, f"features_{args.data_prefix}.pt")
     print("\n--- Feature Extraction Summary ---")
     print(f"Total Keypoints Detected: {len(keypoints)}")
     if descriptors is not None:
