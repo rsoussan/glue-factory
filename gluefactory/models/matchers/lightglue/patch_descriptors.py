@@ -306,9 +306,10 @@ class PatchData:
 
 
 class PatchWarper:
-    def __init__(self, K: np.ndarray, patch_size: int, max_warped_dim_multiplier: int = 3, border_mode: int = cv2.BORDER_CONSTANT, pitch_degrees: Union[float, None] = None):
+    def __init__(self, K: np.ndarray, patch_size: int, patch_size_factor: int, max_warped_dim_multiplier: int = 3, border_mode: int = cv2.BORDER_CONSTANT, pitch_degrees: Union[float, None] = None):
         self.original_K = K
         self.patch_size = patch_size
+        self.patch_size_factor = patch_size_factor
         self.max_warped_dim = int(self.patch_size * max_warped_dim_multiplier)
         self.border_mode = border_mode
         self.target_normal = np.array([0, 0, -1], dtype=np.float32)
@@ -386,6 +387,7 @@ class PatchWarper:
         K = self.original_K.copy()
         K[0, 2] -= x # cx
         K[1, 2] -= y # cy
+        K = scale_intrinsics(K, self.patch_size_factor) 
  
         K_inv = np.linalg.inv(K)
         H_geo = K @ R @ K_inv
@@ -494,7 +496,7 @@ def detect_features_from_patches(rgb_img, normals, patch_warper):
     H, W = rgb_img.shape[:2]
     
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    feature_detector = DISK(max_num_keypoints=int(2048/PATCH_SIZE_FACTOR)).eval().to(device) 
+    feature_detector = DISK(max_num_keypoints=int(2048/(PATCH_SIZE_FACTOR*PATCH_SIZE_FACTOR))).eval().to(device) 
     keypoints_all = []
     descriptors_all = []
     patches = []
@@ -650,8 +652,8 @@ def create_original_vs_warped_patches_mosaic_image(patches, patch_size, max_warp
         
         # 4. Place original patch (with normal arrow)
         w = int(math.sqrt(len(patches)))
-        i = n % w
-        j = n // w 
+        i = n // w
+        j = n % w 
         display_start_x_orig = j * total_patch_width_display + padding_x
         display_start_y_orig = i * total_patch_height_display + padding_y
         comparison_mosaic[display_start_y_orig : display_start_y_orig + patch_size, 
@@ -709,10 +711,9 @@ if __name__ == "__main__":
         sys.exit(1)
    
     h, w = rgb_image.shape[:2] 
-    K = scale_intrinsics(K, PATCH_SIZE_FACTOR) 
         
     normals = get_normals(depth_image, K, device)
-    patch_warper = PatchWarper(K, PATCH_SIZE, MAX_WARPED_DIM_MULTIPLIER, BORDER_MODE, args.fixed_pitch)
+    patch_warper = PatchWarper(K, PATCH_SIZE, PATCH_SIZE_FACTOR, MAX_WARPED_DIM_MULTIPLIER, BORDER_MODE, args.fixed_pitch)
     keypoints, descriptors, patches = detect_features_from_patches(rgb_image, normals, patch_warper)
     print("\n--- Feature Extraction Summary ---")
     print(f"Total Keypoints Detected: {len(keypoints)}")
