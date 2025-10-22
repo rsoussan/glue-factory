@@ -9,6 +9,8 @@ from PIL import Image
 import math
 from typing import Union, Tuple 
 from disk import DISK
+from sift import SIFT
+from superpoint import SuperPoint
 from scipy.spatial.transform import Rotation as R
 from gluefactory.geometry.depth import sample_normals_from_depth
 from dataclasses import dataclass
@@ -388,7 +390,7 @@ class PatchWarper:
         K = self.original_K.copy()
         K[0, 2] -= x # cx
         K[1, 2] -= y # cy
-        K = scale_intrinsics(K, self.patch_size_factor) 
+        #K = scale_intrinsics(K, self.patch_size_factor) 
  
         K_inv = np.linalg.inv(K)
         H_geo = K @ R @ K_inv
@@ -406,7 +408,7 @@ class PatchWarper:
             print("Invalid mean normal, not applying rotation.")
             return np.eye(3)
         rotation = rotation_matrix_from_vectors(mean_normal, self.target_normal)
-        return clamp_rotation_rpy(rotation, [45, 45, 45])    
+        return clamp_rotation_rpy(rotation, [55, 55, 55])    
 
     def warp_patch(self, rgb_patch, x, y, mean_normal):
         R = self.get_rotation(mean_normal)
@@ -514,7 +516,8 @@ def detect_features_from_patches(rgb_img, normals, patch_warper):
     H, W = rgb_img.shape[:2]
     
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    feature_detector = DISK(max_num_keypoints=int(2048/(PATCH_SIZE_FACTOR*PATCH_SIZE_FACTOR))).eval().to(device) 
+    #feature_detector = DISK(max_num_keypoints=int(2048/(PATCH_SIZE_FACTOR*PATCH_SIZE_FACTOR))).eval().to(device) 
+    feature_detector = SuperPoint(max_num_keypoints=int(2048/(PATCH_SIZE_FACTOR*PATCH_SIZE_FACTOR))).eval().to(device) 
     keypoints_all = []
     descriptors_all = []
     patches = []
@@ -726,7 +729,7 @@ if __name__ == "__main__":
    
     h, w = rgb_image.shape[:2] 
     # Constants
-    PATCH_SIZE_FACTOR = 12 
+    PATCH_SIZE_FACTOR = 4 
     # Assumes square image. TODO: account for non square images...
     PATCH_SIZE = w // PATCH_SIZE_FACTOR # This should be 64
     MAX_WARPED_DIM_MULTIPLIER = 3 
