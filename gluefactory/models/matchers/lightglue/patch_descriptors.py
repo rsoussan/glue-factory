@@ -290,14 +290,17 @@ def load_data(data_path, prefix='0'):
 #
     return rgb_img_np, depth_img_np, rgb_tensor_original, depth_tensor_processed, K
 
-def save_data(keypoints, descriptors, filename):
+def save_data(keypoints, descriptors, image_tensor, depth_tensor, feature_detector_name, filename):
     kp_array = torch.tensor([kp.pt for kp in keypoints], dtype=torch.float32)
     desc_tensor = torch.tensor(descriptors, dtype=torch.float32)
     scores_tensor = torch.tensor([kp.response for kp in keypoints], dtype=torch.float32)
     torch.save({
         "keypoints": kp_array,
         "descriptors": desc_tensor,
-        "scores": scores_tensor
+        "scores": scores_tensor,
+        "image": image_tensor, 
+        "depth": depth_tensor, 
+        "features": feature_detector_name
     }, filename)
 
 def rotation_matrix_from_vectors(vec1, vec2):
@@ -645,15 +648,23 @@ def detect_features_and_unwarp(
 
     return unwarped_pred
 
-def detect_features_from_patches(rgb_img, normals, patch_warper):
+def detect_features_from_patches(rgb_img, normals, patch_warper, feature_detector_name):
     """
     Extracts features after warping patches based on mean normal or fixed pitch rotation.
     """
     H, W = rgb_img.shape[:2]
     
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    feature_detector = DISK(max_num_keypoints=int(2048/(PATCH_SIZE_FACTOR*PATCH_SIZE_FACTOR))).eval().to(device) 
-    #feature_detector = SuperPoint(max_num_keypoints=int(2048/(PATCH_SIZE_FACTOR*PATCH_SIZE_FACTOR))).eval().to(device) 
+    feature_detector = None
+    if feature_detector_name == 'disk':
+        feature_detector = DISK(max_num_keypoints=int(2048/(PATCH_SIZE_FACTOR*PATCH_SIZE_FACTOR))).eval().to(device) 
+    elif feature_detector_name == 'sift':
+        feature_detector = SIFT(max_num_keypoints=int(2048/(PATCH_SIZE_FACTOR*PATCH_SIZE_FACTOR))).eval().to(device) 
+    elif feature_detector_name == 'superpoint':
+        feature_detector = SuperPoint(max_num_keypoints=int(2048/(PATCH_SIZE_FACTOR*PATCH_SIZE_FACTOR))).eval().to(device) 
+    else:
+        print(f"Invalid feature detector: {feature_detector_name}")
+        sys.exit(1)
     keypoints_all = []
     descriptors_all = []
     patches = []
@@ -854,6 +865,7 @@ if __name__ == "__main__":
      
     parser = argparse.ArgumentParser(description="Patch-based feature extractor.")
     parser.add_argument("data_path", help="Path to the PyTorch .pt data file.")
+    parser.add_argument("--feature_detector", type=str, default='disk', help="disk, sift, or superpoint")
     parser.add_argument("--fixed_pitch", type=float, default=None, help="If provided, use a fixed pitch rotation (degrees) instead of rotations derived from depth normals.")
     parser.add_argument("--data_prefix", type=str, default='0', help="Data to load, can be 0 or 1.")
     args = parser.parse_args()
@@ -878,8 +890,8 @@ if __name__ == "__main__":
         
     normals = get_normals(depth_image, K, device)
     patch_warper = PatchWarper(K, PATCH_SIZE, PATCH_SIZE_FACTOR, MAX_WARPED_DIM_MULTIPLIER, BORDER_MODE, args.fixed_pitch)
-    keypoints, descriptors, patches = detect_features_from_patches(rgb_image, normals, patch_warper)
-    save_data(keypoints, descriptors, f"features_{args.data_prefix}.pt")
+    keypoints, descriptors, patches = detect_features_from_patches(rgb_image, normals, patch_warper, args.feature_detector)
+    save_data(keypoints, descriptors, rgb_tensor, depth_tensor, args.feature_detector, f"features_{args.data_prefix}.pt")
     print("\n--- Feature Extraction Summary ---")
     print(f"Total Keypoints Detected: {len(keypoints)}")
     if descriptors is not None:
