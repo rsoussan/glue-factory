@@ -105,6 +105,30 @@ def get_kp_depth(keypoints, depth):
     d, valid = sample_depth(keypoints, depth)
     return d
 
+def balance_keypoints_by_scores(features0, features1):
+    """
+    Ensures features0 and features1 have the same number of keypoints/descriptors/scores
+    by removing the lowest-scoring ones from the larger set.
+    Operates in-place on the passed dicts.
+    """
+    scores0 = features0['scores']
+    scores1 = features1['scores']
+    n0, n1 = len(scores0), len(scores1)
+
+    if n0 == n1:
+        return  # already balanced
+
+    if n0 > n1:
+        num_keep = n1
+        keep_idx = torch.topk(scores0, num_keep, largest=True).indices
+        for k in ['keypoints', 'descriptors', 'scores']:
+            features0[k] = features0[k][keep_idx]
+    else:
+        num_keep = n0
+        keep_idx = torch.topk(scores1, num_keep, largest=True).indices
+        for k in ['keypoints', 'descriptors', 'scores']:
+            features1[k] = features1[k][keep_idx]
+
 if __name__ == "__main__":
     if not torch.cuda.is_available():
         print("FATAL ERROR: CUDA is required but is not available.")
@@ -132,6 +156,9 @@ if __name__ == "__main__":
     if features0 != features1:
         print(f"Features 0 {features0} differs from features 1 {features1}, exiting.")
         sys.exit(1)
+    # Need each image to have the same number of keypoints to work with trained LightGlue instance due to masking
+    balance_keypoints_by_scores(feats0, feats1)
+
     image0 = feats0['image']
     image1 = feats1['image']
     w = h = image0.shape[1]
