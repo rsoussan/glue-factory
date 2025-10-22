@@ -216,20 +216,22 @@ def filter_keypoints_near_warped_boundary(
     return filtered_kpts, filtered_descriptors, filtered_scores
 
 # TODO: clean all this up! unify rgsw data output to match megadepth data output! remove conditional processing!!
-def load_data(data_path):
+def load_data(data_path, prefix='0'):
     if not os.path.exists(data_path):
         raise FileNotFoundError(f"PyTorch data file not found at: {data_path}")
 
     data = torch.load(data_path)
     depth_tensor_original = {}
-    if 'depth0' in data:
-        depth_tensor_original = data['depth0']
+    depth_name = 'depth' + prefix
+    view_name = 'view' + prefix
+    if depth_name in data:
+        depth_tensor_original = data[depth_name]
     else:
-        depth_tensor_original = data['view0']['depth']
+        depth_tensor_original = data[view_name]['depth']
 
     try:
-        rgb_tensor_original = data['view0']['image']
-        camera_object = data['view0']['camera']
+        rgb_tensor_original = data[view_name]['image']
+        camera_object = data[view_name]['camera']
     except KeyError as e:
         raise KeyError(f"Missing expected key in .pt file: {e}.")
 
@@ -288,6 +290,15 @@ def load_data(data_path):
 #
     return rgb_img_np, depth_img_np, rgb_tensor_original, depth_tensor_processed, K
 
+def save_data(keypoints, descriptors, filename):
+    kp_array = torch.tensor([kp.pt for kp in keypoints], dtype=torch.float32)
+    desc_tensor = torch.tensor(descriptors, dtype=torch.float32)
+    scores_tensor = torch.tensor([kp.response for kp in keypoints], dtype=torch.float32)
+    torch.save({
+        "keypoints": kp_array,
+        "descriptors": desc_tensor,
+        "scores": scores_tensor
+    }, filename)
 
 def rotation_matrix_from_vectors(vec1, vec2):
     """Find the rotation matrix that rotates vec1 to vec2 (Rodrigues' formula)."""
@@ -641,8 +652,8 @@ def detect_features_from_patches(rgb_img, normals, patch_warper):
     H, W = rgb_img.shape[:2]
     
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    #feature_detector = DISK(max_num_keypoints=int(2048/(PATCH_SIZE_FACTOR*PATCH_SIZE_FACTOR))).eval().to(device) 
-    feature_detector = SuperPoint(max_num_keypoints=int(2048/(PATCH_SIZE_FACTOR*PATCH_SIZE_FACTOR))).eval().to(device) 
+    feature_detector = DISK(max_num_keypoints=int(2048/(PATCH_SIZE_FACTOR*PATCH_SIZE_FACTOR))).eval().to(device) 
+    #feature_detector = SuperPoint(max_num_keypoints=int(2048/(PATCH_SIZE_FACTOR*PATCH_SIZE_FACTOR))).eval().to(device) 
     keypoints_all = []
     descriptors_all = []
     patches = []
@@ -844,6 +855,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Patch-based feature extractor.")
     parser.add_argument("data_path", help="Path to the PyTorch .pt data file.")
     parser.add_argument("--fixed_pitch", type=float, default=None, help="If provided, use a fixed pitch rotation (degrees) instead of rotations derived from depth normals.")
+    parser.add_argument("--data_prefix", type=str, default='0', help="Data to load, can be 0 or 1.")
     args = parser.parse_args()
 
     if args.fixed_pitch is not None:
@@ -851,7 +863,7 @@ if __name__ == "__main__":
 
     # Load data 
     try:
-        rgb_image, depth_image, rgb_tensor, depth_tensor, K = load_data(args.data_path)
+        rgb_image, depth_image, rgb_tensor, depth_tensor, K = load_data(args.data_path, prefix=args.data_prefix)
     except Exception as e:
         print(f"FATAL ERROR: Could not load data from {args.pt_path}. Reason: {e}")
         sys.exit(1)
@@ -867,6 +879,7 @@ if __name__ == "__main__":
     normals = get_normals(depth_image, K, device)
     patch_warper = PatchWarper(K, PATCH_SIZE, PATCH_SIZE_FACTOR, MAX_WARPED_DIM_MULTIPLIER, BORDER_MODE, args.fixed_pitch)
     keypoints, descriptors, patches = detect_features_from_patches(rgb_image, normals, patch_warper)
+    save_data(keypoints, descriptors, f"features_{args.data_prefix}.pt")
     print("\n--- Feature Extraction Summary ---")
     print(f"Total Keypoints Detected: {len(keypoints)}")
     if descriptors is not None:
