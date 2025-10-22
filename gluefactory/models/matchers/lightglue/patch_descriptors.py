@@ -400,6 +400,10 @@ class PatchWarper:
     def get_rotation(self, mean_normal):
         if self.R_fixed is not None:
             return self.R_fixed
+        valid = np.any(~np.isclose(mean_normal, 0, atol=1e-6)) and np.isfinite(mean_normal).all()
+        if not valid:
+            print("Invalid mean normal, not applying rotation.")
+            return np.eye(3)
         rotation = rotation_matrix_from_vectors(mean_normal, self.target_normal)
         return clamp_rotation_rpy(rotation, [45, 45, 45])    
 
@@ -695,14 +699,6 @@ if __name__ == "__main__":
     if args.fixed_pitch is not None:
         print(f"Using fixed pitch: {args.fixed_pitch}")
 
-    # TODO: where are these used?
-    IMAGE_WIDTH = 2048
-    IMAGE_HEIGHT = 2048
-    PATCH_SIZE_FACTOR = 2 
-    PATCH_SIZE = IMAGE_WIDTH // PATCH_SIZE_FACTOR # This should be 64
-    MAX_WARPED_DIM_MULTIPLIER = 3 
-    BORDER_MODE = cv2.BORDER_CONSTANT 
-
     # Load data 
     try:
         rgb_image, depth_image, rgb_tensor, depth_tensor, K = load_data(args.data_path)
@@ -711,6 +707,12 @@ if __name__ == "__main__":
         sys.exit(1)
    
     h, w = rgb_image.shape[:2] 
+    # Constants
+    PATCH_SIZE_FACTOR = 8 
+    # Assumes square image. TODO: account for non square images...
+    PATCH_SIZE = w // PATCH_SIZE_FACTOR # This should be 64
+    MAX_WARPED_DIM_MULTIPLIER = 3 
+    BORDER_MODE = cv2.BORDER_CONSTANT 
         
     normals = get_normals(depth_image, K, device)
     patch_warper = PatchWarper(K, PATCH_SIZE, PATCH_SIZE_FACTOR, MAX_WARPED_DIM_MULTIPLIER, BORDER_MODE, args.fixed_pitch)
