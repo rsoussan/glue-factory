@@ -142,6 +142,7 @@ if __name__ == "__main__":
     # Load args 
     parser = argparse.ArgumentParser(description="LightGlue matcher.")
     parser.add_argument("--default_lg", action="store_true", help="Use default (pretrained) version of LightGlue")
+    parser.add_argument("--match_threshold", "-m", type=float, default=0.5, help="Matching threshold")
     args = parser.parse_args()
 
     # Setup extractor and matcher
@@ -199,8 +200,7 @@ if __name__ == "__main__":
     kpts1 = data["keypoints1"].squeeze(0)
 
     # Filter matches
-    match_threshold = 0.5
-    matches, scores, invalid_matches, invalid_scores = filter_matches_by_score(matches, scores, match_threshold)
+    matches, scores, invalid_matches, invalid_scores = filter_matches_by_score(matches, scores, args.match_threshold)
     m_kpts0, m_kpts1 = kpts0[matches[..., 0]], kpts1[matches[..., 1]]
 
     image0 = data['view0']['image'][0].cpu()
