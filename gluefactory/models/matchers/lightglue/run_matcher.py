@@ -1,0 +1,197 @@
+from disk import DISK
+from utils import load_image, rbd
+from torchvision.utils import save_image
+import viz2d
+import torch
+import sys
+import random
+import numpy as np
+import os
+import argparse
+from pathlib import Path
+from torch.nn.modules.utils import consume_prefix_in_state_dict_if_present
+from gluefactory.models.matchers.lightglue_pretrained import LightGlue as LightGluePretrained
+from gluefactory.models.matchers.lightglue import LightGlue 
+from gluefactory.geometry.depth import sample_depth
+
+import torch
+
+def filter_matches_by_score(matches: torch.Tensor, scores: torch.Tensor, th: float):
+    """
+    Split matches into valid and invalid based on score threshold.
+
+    Args:
+        matches: Tensor of shape [N, 2], each row = (kp0_idx, kp1_idx)
+        scores: Tensor of shape [N], confidence score for each match
+        th: float, threshold
+
+    Returns:
+        valid_matches: Tensor [M, 2], scores above threshold
+        valid_scores: Tensor [M]
+        invalid_matches: Tensor [K, 2], scores below or equal threshold
+        invalid_scores: Tensor [K]
+    """
+    mask = scores > th
+    valid_matches = matches[mask]
+    valid_scores = scores[mask]
+    invalid_matches = matches[~mask]
+    invalid_scores = scores[~mask]
+    return valid_matches, valid_scores, invalid_matches, invalid_scores
+
+def load_and_check_model(model, ckpt_path, key="model", strict=False, map_location="cpu"):
+    """
+    Load a checkpoint into a model and verify which layers matched.
+    
+    Args:
+        model: torch.nn.Module
+        ckpt_path: str, path to checkpoint (.pth file)
+        key: str, key in checkpoint dict containing state_dict
+        strict: bool, enforce exact key match
+        map_location: str or torch.device
+    
+    Returns:
+        model: loaded model
+        report: dict with missing/unexpected/matching keys and param counts
+    """
+    # Load checkpoint
+    checkpoint = torch.load(ckpt_path, map_location=map_location)
+    state_dict = checkpoint[key] if key in checkpoint else checkpoint
+
+    # Load with requested strictness
+    missing, unexpected = model.load_state_dict(state_dict, strict=strict)
+
+    # Compare keys
+    model_state = model.state_dict()
+    model_keys = set(model_state.keys())
+    ckpt_keys = set(state_dict.keys())
+    matching = sorted(list(model_keys & ckpt_keys))
+
+    # Count parameters
+    model_params = sum(p.numel() for p in model.parameters())
+    ckpt_params = sum(v.numel() for v in state_dict.values())
+
+    # Report
+    report = {
+        "missing_keys": missing,
+        "unexpected_keys": unexpected,
+        "matching_keys": matching,
+        "model_param_count": model_params,
+        "ckpt_param_count": ckpt_params,
+        "all_layers_match": len(missing) == 0 and len(unexpected) == 0 and model_params == ckpt_params
+    }
+
+    # Print summary
+    print("Model params:", model_params)
+    print("Checkpoint params:", ckpt_params)
+
+    if missing:
+        print("\nMissing keys:")
+        for k in missing:
+            print(f"  {k} | model shape: {tuple(model_state[k].shape)}")
+
+    if unexpected:
+        print("\nUnexpected keys:")
+        for k in unexpected:
+            print(f"  {k} | checkpoint shape: {tuple(state_dict[k].shape)}")
+
+    print(f"\nMatching keys ({len(matching)}):")
+    for k in matching:
+        print(f"  {k} | model shape: {tuple(model_state[k].shape)} | checkpoint shape: {tuple(state_dict[k].shape)}")
+
+    return model, report
+
+def get_kp_depth(keypoints, depth):
+    print(f"keytpoints shape: {keypoints.shape}, depth shape: {depth.shape}")
+    d, valid = sample_depth(keypoints, depth)
+    return d
+
+if __name__ == "__main__":
+    if not torch.cuda.is_available():
+        print("FATAL ERROR: CUDA is required but is not available.")
+        sys.exit(1)
+    device = torch.device('cuda')
+    torch.set_default_device(device)
+    seed = 42
+    torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.benchmark = False
+    
+    # Load args 
+    parser = argparse.ArgumentParser(description="LightGlue matcher.")
+    parser.add_argument("--default_lg", action="store_true", help="Use default (pretrained) version of LightGlue")
+    args = parser.parse_args()
+
+    # Setup extractor and matcher
+    torch.set_grad_enabled(False)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")  # 'mps', 'cpu'
+
+    # Load data
+    feats0 = torch.load('0/features_0.pt')
+    feats1 = torch.load('1/features_1.pt')
+    features0 = feats0['features']
+    features1 = feats1['features']
+    if features0 != features1:
+        print(f"Features 0 {features0} differs from features 1 {features1}, exiting.")
+        sys.exit(1)
+    image0 = feats0['image']
+    image1 = feats1['image']
+    w = h = image0.shape[1]
+    data = {"keypoints0": feats0['keypoints'].unsqueeze(0), "keypoints1": feats1['keypoints'].unsqueeze(0), "descriptors0": feats0['descriptors'].unsqueeze(0), "descriptors1": feats1['descriptors'].unsqueeze(0)}
+    print(f"keypoints0 shape: {data['keypoints0'].shape}, depth shape: {feats0['depth'].shape}")
+    print(f"keypoints1 shape: {data['keypoints1'].shape}, depth shape: {feats1['depth'].shape}")
+    data["depth_keypoints0"] = get_kp_depth(data["keypoints0"], feats0['depth'].to(device).unsqueeze(0)) 
+    data["depth_keypoints1"] = get_kp_depth(data["keypoints1"], feats1['depth'].to(device).unsqueeze(0)) 
+    data['overlap_0to1'] = 0.3
+    data["view0"] = {"image_size": [w, h]}
+    data["view1"] = {"image_size": [w, h]}
+    data["view0"]['image'] = image0
+    data["view1"]['image'] = image1
+
+    # Setup LightGlue
+    matcher = None
+    if args.default_lg:
+        conf = LightGluePretrained.default_conf
+        conf['features'] = features0
+        matcher = LightGluePretrained(conf).eval().to(device)
+    else:
+        if features0 != 'disk':
+            print(f"Custom LightGlue training only supports disk features, {features0} selected.")
+        conf = LightGlue.default_conf
+        #conf['features'] = features0
+        conf['input_dim'] = 128
+        conf['filter_threshold'] = 0
+        conf['weights'] = '/usr/local/home/rsoussan/glue-factory/outputs/training/bartlett/depth_only_combined_string_encoding/checkpoint_best.pth'
+        matcher = LightGlue(conf).eval().to(device)
+
+    # Predict
+    pred = matcher(data) 
+
+    # Save data
+    matches = pred["matches"][0]
+    scores = pred["scores"][0]
+    kpts0 = data["keypoints0"].squeeze(0)
+    kpts1 = data["keypoints1"].squeeze(0)
+
+    # Filter matches
+    match_threshold = 0.5
+    matches, scores, invalid_matches, invalid_scores = filter_matches_by_score(matches, scores, match_threshold)
+    m_kpts0, m_kpts1 = kpts0[matches[..., 0]], kpts1[matches[..., 1]]
+
+    image0 = data['view0']['image'][0].cpu()
+    image1 = data['view1']['image'][0].cpu()
+
+
+    print(f'Matches: {matches.shape[0]}')
+    print(f'Invalid Matches: {invalid_matches.shape[0]}')
+
+    # Save valid matches
+    axes = viz2d.plot_images([image0, image1])
+    viz2d.plot_matches(m_kpts0, m_kpts1, color="lime", lw=0.2)
+    viz2d.add_text(0, f'Matches: {matches.shape[0]}', fs=20)
+    viz2d.save_plot("valid_matches.png")
+
+    # Save invalid matches
+    m_kpts0, m_kpts1 = kpts0[invalid_matches[..., 0]], kpts1[invalid_matches[..., 1]]
+    axes = viz2d.plot_images([image0, image1])
+    viz2d.plot_matches(m_kpts0, m_kpts1, color="lime", lw=0.2)
+    viz2d.add_text(0, f'Invalid Matches: {invalid_matches.shape[0]}', fs=20)
+    viz2d.save_plot("invalid_matches.png")
