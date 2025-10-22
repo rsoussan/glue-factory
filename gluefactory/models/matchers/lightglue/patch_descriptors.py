@@ -96,6 +96,12 @@ def save_tensor_as_image(tensor: torch.Tensor, filename: str, normalize_range='m
     
     save_image(normalized_tensor.clamp(0.0, 1.0), filename)
 
+def filter_bottom_percent_keypoints(keypoints, bottom_percent):
+    responses = np.array([kp.response for kp in keypoints], dtype=float)
+    threshold = np.quantile(responses, bottom_percent)
+    filtered_keypoints = [kp for kp in keypoints if kp.response > threshold]
+    return filtered_keypoints
+
 # TODO: clean all this up! unify rgsw data output to match megadepth data output! remove conditional processing!!
 def load_data(data_path):
     if not os.path.exists(data_path):
@@ -516,8 +522,8 @@ def detect_features_from_patches(rgb_img, normals, patch_warper):
     H, W = rgb_img.shape[:2]
     
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    #feature_detector = DISK(max_num_keypoints=int(2048/(PATCH_SIZE_FACTOR*PATCH_SIZE_FACTOR))).eval().to(device) 
-    feature_detector = SuperPoint(max_num_keypoints=int(2048/(PATCH_SIZE_FACTOR*PATCH_SIZE_FACTOR))).eval().to(device) 
+    feature_detector = DISK(max_num_keypoints=int(2048/(PATCH_SIZE_FACTOR*PATCH_SIZE_FACTOR))).eval().to(device) 
+    #feature_detector = SuperPoint(max_num_keypoints=int(2048/(PATCH_SIZE_FACTOR*PATCH_SIZE_FACTOR))).eval().to(device) 
     keypoints_all = []
     descriptors_all = []
     patches = []
@@ -558,7 +564,7 @@ def create_keypoint_image(keypoints, rgb_image, patch_size):
     return keypoint_image
  
 
-def create_warped_patches_mosaic_image(patches, h, w, draw_keypoints = False):
+def create_warped_patches_mosaic_image(patches, h, w, draw_keypoints = False, filter_keypoints_bottom_percent=None):
     mosaic_image = np.zeros((h, w, 3), dtype=np.uint8)
     for patch in patches:
         x = patch.x
@@ -570,7 +576,10 @@ def create_warped_patches_mosaic_image(patches, h, w, draw_keypoints = False):
        
         warped_patch = patch.warped_patch.copy() 
         if draw_keypoints:
-            warped_patch = cv2.drawKeypoints(image=warped_patch, keypoints=patch.warped_keypoints, outImage=None, color=(0, 255, 0), flags=cv2.DRAW_MATCHES_FLAGS_DRAW_RICH_KEYPOINTS)
+            keypoints = patch.warped_keypoints
+            if filter_keypoints_bottom_percent is not None:
+                keypoints = filter_bottom_percent_keypoints(keypoints, filter_keypoints_bottom_percent)  
+            warped_patch = cv2.drawKeypoints(image=warped_patch, keypoints=keypoints, outImage=None, color=(0, 255, 0), flags=cv2.DRAW_MATCHES_FLAGS_DRAW_RICH_KEYPOINTS)
         resized_warped_patch = cv2.resize(
             warped_patch, 
             (patch_size, patch_size), 
@@ -766,6 +775,10 @@ if __name__ == "__main__":
     # Save warped patches mosaic with keypoints
     warped_patches_mosaic_with_keypoints_image = create_warped_patches_mosaic_image(patches, h, w, draw_keypoints=True)
     cv2.imwrite("warped_patches_mosaic_with_keypoints.png", warped_patches_mosaic_with_keypoints_image)
+
+    # Save warped patches mosaic with filtered keypoints
+    warped_patches_mosaic_with_filtered_keypoints_image = create_warped_patches_mosaic_image(patches, h, w, draw_keypoints=True, filter_keypoints_bottom_percent=0.5)
+    cv2.imwrite("warped_patches_mosaic_with_filtered_keypoints.png", warped_patches_mosaic_with_filtered_keypoints_image)
 
     # Save original vs warped patches mosaic
     original_vs_warped_patches_mosaic_image = create_original_vs_warped_patches_mosaic_image(patches, PATCH_SIZE, patch_warper.max_warped_dim, h, w)
