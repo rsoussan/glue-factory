@@ -303,6 +303,7 @@ class PatchData:
     y: int                          # top-left y of patch in global image
     homography: np.ndarray          # (3, 3) warp homography matrix
     mean_normal: np.ndarray         # (1, 3) mean normal
+    warped_keypoints: list 
 
 
 class PatchWarper:
@@ -430,7 +431,8 @@ def detect_features_and_unwarp(
     x,
     y,
     unwarped_keypoints_all,
-    descriptors_all
+    descriptors_all, 
+    warped_keypoints
 ):
     device="cuda" if torch.cuda.is_available() else "cpu"
     # Convert image to Torch format 
@@ -460,6 +462,18 @@ def detect_features_and_unwarp(
 
     # Add new descriptors
     descriptors_all.append(descriptors)
+
+    # Save warped keypoints
+    for i, (keypoint_x, keypoint_y) in enumerate(keypoints):
+        keypoint = cv2.KeyPoint(
+            x=float(keypoint_x),
+            y=float(keypoint_y),
+            size=1.0,
+            angle=-1,
+            response=float(scores[i]),
+            octave=0
+        )
+        warped_keypoints.append(keypoint)
 
     # Unwarp keypoints 
     H_inv = np.linalg.inv(H)
@@ -513,9 +527,9 @@ def detect_features_from_patches(rgb_img, normals, patch_warper):
             normal_patch = normals[y:y_end, x:x_end]
             mean_normal = patch_mean_normal(normal_patch) 
             warped_patch, H = patch_warper.warp_patch(rgb_patch, x, y, mean_normal)
-            patches.append(PatchData(rgb_patch, warped_patch, x, y, H, mean_normal))
             # TODO: don't convert to grayscale? -> make this optional!! (BB) 
             #gray_warped_patch = cv2.cvtColor(warped_patch, cv2.COLOR_BGR2GRAY)
+            warped_keypoints = []
             detect_features_and_unwarp(
                 feature_detector,
                 warped_patch,
@@ -523,8 +537,10 @@ def detect_features_from_patches(rgb_img, normals, patch_warper):
                 x,
                 y,
                 keypoints_all,
-                descriptors_all
+                descriptors_all, 
+                warped_keypoints
             )
+            patches.append(PatchData(rgb_patch, warped_patch, x, y, H, mean_normal, warped_keypoints))
     descriptors_all = np.vstack(descriptors_all)
     return keypoints_all, descriptors_all, patches
 
@@ -539,7 +555,7 @@ def create_keypoint_image(keypoints, rgb_image, patch_size):
     return keypoint_image
  
 
-def create_warped_patches_mosaic_image(patches, h, w):
+def create_warped_patches_mosaic_image(patches, h, w, draw_keypoints = False):
     mosaic_image = np.zeros((h, w, 3), dtype=np.uint8)
     for patch in patches:
         x = patch.x
@@ -549,7 +565,9 @@ def create_warped_patches_mosaic_image(patches, h, w):
         y_end = y + patch_size
         x_end = x + patch_size
        
-        warped_patch = patch.warped_patch 
+        warped_patch = patch.warped_patch.copy() 
+        if draw_keypoints:
+            warped_patch = cv2.drawKeypoints(image=warped_patch, keypoints=patch.warped_keypoints, outImage=None, color=(0, 255, 0), flags=cv2.DRAW_MATCHES_FLAGS_DRAW_RICH_KEYPOINTS)
         resized_warped_patch = cv2.resize(
             warped_patch, 
             (patch_size, patch_size), 
@@ -708,7 +726,7 @@ if __name__ == "__main__":
    
     h, w = rgb_image.shape[:2] 
     # Constants
-    PATCH_SIZE_FACTOR = 8 
+    PATCH_SIZE_FACTOR = 12 
     # Assumes square image. TODO: account for non square images...
     PATCH_SIZE = w // PATCH_SIZE_FACTOR # This should be 64
     MAX_WARPED_DIM_MULTIPLIER = 3 
@@ -741,6 +759,10 @@ if __name__ == "__main__":
     # Save warped patches mosaic
     warped_patches_mosaic_image = create_warped_patches_mosaic_image(patches, h, w)
     cv2.imwrite("warped_patches_mosaic.png", warped_patches_mosaic_image)
+
+    # Save warped patches mosaic with keypoints
+    warped_patches_mosaic_with_keypoints_image = create_warped_patches_mosaic_image(patches, h, w, draw_keypoints=True)
+    cv2.imwrite("warped_patches_mosaic_with_keypoints.png", warped_patches_mosaic_with_keypoints_image)
 
     # Save original vs warped patches mosaic
     original_vs_warped_patches_mosaic_image = create_original_vs_warped_patches_mosaic_image(patches, PATCH_SIZE, patch_warper.max_warped_dim, h, w)
