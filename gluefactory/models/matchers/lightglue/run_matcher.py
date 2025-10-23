@@ -131,6 +131,25 @@ def balance_keypoints_by_scores(features0, features1):
         for k in ['keypoints', 'descriptors', 'scores']:
             features1[k] = features1[k][keep_idx]
 
+def crop_top_black_rows(img, keypoints, threshold_ratio=0.02):
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) if img.ndim == 3 else img
+    h, w = gray.shape
+    non_black_counts = np.count_nonzero(gray > 0, axis=1)
+    row_threshold = threshold_ratio * w
+
+    valid_rows = np.where(non_black_counts >= row_threshold)[0]
+    if len(valid_rows) > 0:
+        crop_top = int(valid_rows[0])
+        cropped_img = img[crop_top:, :]
+        cropped_keypoints = keypoints.copy()
+        cropped_keypoints[:, 1] -= crop_top
+    else:
+        cropped_img = img
+        cropped_keypoints = keypoints.copy()
+
+    return cropped_img, cropped_keypoints
+
+
 def save_matches_in_warped_view(
     img0, img1, kpts0, kpts1, K, R, save_path="warped_matches.png"
 ):
@@ -151,6 +170,10 @@ def save_matches_in_warped_view(
 
     img0, img1 = to_numpy(img0), to_numpy(img1)
     h, w = img0.shape[:2]
+
+    threshold_ratio = 0.5
+    img0, kpts0 = crop_top_black_rows(img0, kpts0, threshold_ratio)
+    img1, kpts1 = crop_top_black_rows(img1, kpts1, threshold_ratio)
 
     # Compute homography for pure rotation
     H = K @ R @ np.linalg.inv(K)
@@ -202,57 +225,6 @@ def save_matches_in_warped_view(
     )
 
     cv2.imwrite(save_path, matched_vis)
-
-#def save_matches_in_warped_view(
-#    img0, img1, kpts0, kpts1, K, R, save_path="warped_matches.png"):
-#    """
-#    Warps img1 into img0's view using rotation R and shared intrinsics K.
-#    Then, projects and draws matching keypoints in this warped view.
-#    """
-#
-#    # Convert PyTorch tensor to numpy if needed
-#    if isinstance(img1, torch.Tensor):
-#        img1 = img1.detach().cpu().numpy()
-#        # Convert from [C, H, W] → [H, W, C] if needed
-#        if img1.ndim == 3 and img1.shape[0] in [1, 3]:
-#            img1 = np.transpose(img1, (1, 2, 0))
-#        # Scale to 0–255 and uint8 if it's float
-#        if img1.dtype != np.uint8:
-#            img1 = np.clip(img1 * 255, 0, 255).astype(np.uint8)
-#
-#    if isinstance(img0, torch.Tensor):
-#        img0 = img0.detach().cpu().numpy()
-#        if img0.ndim == 3 and img0.shape[0] in [1, 3]:
-#            img0 = np.transpose(img0, (1, 2, 0))
-#        if img0.dtype != np.uint8:
-#            img0 = np.clip(img0 * 255, 0, 255).astype(np.uint8)
-#
-#    h, w = img0.shape[:2]
-#    # Compute homography for pure rotation
-#    H = K @ R @ np.linalg.inv(K)
-#
-#    warped_img0 = cv2.warpPerspective(img0, H, (w, h))
-#    warped_img1 = cv2.warpPerspective(img1, H, (w, h))
-#
-#    kpts0_h = np.concatenate([kpts0, np.ones((len(kpts0), 1))], axis=1)  # Nx3
-#    kpts0_warped = (H @ kpts0_h.T).T
-#    kpts0_warped = kpts0_warped[:, :2] / kpts0_warped[:, 2:]
-#
-#    kpts1_h = np.concatenate([kpts1, np.ones((len(kpts1), 1))], axis=1)  # Nx3
-#    kpts1_warped = (H @ kpts1_h.T).T
-#    kpts1_warped = kpts1_warped[:, :2] / kpts1_warped[:, 2:]
-#
-#    # Convert to cv2.KeyPoint
-#    kps0_cv = [cv2.KeyPoint(float(x), float(y), 1) for x, y in kpts0_warped]
-#    kps1_cv = [cv2.KeyPoint(float(x), float(y), 1) for x, y in kpts1_warped]
-#    matches = [cv2.DMatch(i, i, 0) for i in range(len(kpts0))]
-#
-#    matched_vis = cv2.drawMatches(
-#        warped_img0, kps0_cv, warped_img1, kps1_cv, matches, None,
-#        matchColor=(0, 255, 0), flags=cv2.DrawMatchesFlags_NOT_DRAW_SINGLE_POINTS
-#    )
-#    cv2.imwrite(save_path, matched_vis)
-
 
 if __name__ == "__main__":
     if not torch.cuda.is_available():
