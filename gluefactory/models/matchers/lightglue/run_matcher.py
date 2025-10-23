@@ -5,6 +5,7 @@ import viz2d
 import torch
 import sys
 import random
+import cv2
 import numpy as np
 import os
 import argparse
@@ -13,6 +14,7 @@ from torch.nn.modules.utils import consume_prefix_in_state_dict_if_present
 from gluefactory.models.matchers.lightglue_pretrained import LightGlue as LightGluePretrained
 from gluefactory.models.matchers.lightglue import LightGlue 
 from gluefactory.geometry.depth import sample_depth
+from scipy.spatial.transform import Rotation as R
 
 import torch
 
@@ -129,6 +131,129 @@ def balance_keypoints_by_scores(features0, features1):
         for k in ['keypoints', 'descriptors', 'scores']:
             features1[k] = features1[k][keep_idx]
 
+def save_matches_in_warped_view(
+    img0, img1, kpts0, kpts1, K, R, save_path="warped_matches.png"
+):
+    """
+    Warps img1 into img0's view using rotation R and shared intrinsics K.
+    Then, projects and draws matching keypoints in this warped view,
+    scaling and shifting the warped result to fit the original image size.
+    """
+
+    def to_numpy(img):
+        if isinstance(img, torch.Tensor):
+            img = img.detach().cpu().numpy()
+            if img.ndim == 3 and img.shape[0] in [1, 3]:
+                img = np.transpose(img, (1, 2, 0))
+            if img.dtype != np.uint8:
+                img = np.clip(img * 255, 0, 255).astype(np.uint8)
+        return img
+
+    img0, img1 = to_numpy(img0), to_numpy(img1)
+    h, w = img0.shape[:2]
+
+    # Compute homography for pure rotation
+    H = K @ R @ np.linalg.inv(K)
+
+    # Warp the corners of the image to find extents
+    corners = np.array([[0, 0, 1],
+                        [w, 0, 1],
+                        [w, h, 1],
+                        [0, h, 1]], dtype=np.float32).T  # 3x4
+    warped_corners = H @ corners
+    warped_corners /= warped_corners[2, :]
+    warped_corners = warped_corners[:2, :].T  # 4x2
+
+    # Compute bounding box of warped image
+    min_xy = warped_corners.min(axis=0)
+    max_xy = warped_corners.max(axis=0)
+    warped_size = max_xy - min_xy
+
+    # Compute scale to fit warped image back into (w, h)
+    scale = min(w / warped_size[0], h / warped_size[1])
+    tx, ty = -min_xy * scale  # translation to shift into view
+    S = np.array([[scale, 0, tx],
+                  [0, scale, ty],
+                  [0, 0, 1]], dtype=np.float32)
+
+    # Apply the scaled+translated homography
+    H_adj = S @ H
+    warped_img0 = cv2.warpPerspective(img0, H_adj, (w, h))
+    warped_img1 = cv2.warpPerspective(img1, H_adj, (w, h))
+
+    # Warp keypoints
+    def warp_kpts(kpts):
+        kpts_h = np.concatenate([kpts, np.ones((len(kpts), 1))], axis=1)
+        kpts_w = (H_adj @ kpts_h.T).T
+        return kpts_w[:, :2] / kpts_w[:, 2:]
+
+    kpts0_warped = warp_kpts(kpts0)
+    kpts1_warped = warp_kpts(kpts1)
+
+    # Convert to cv2.KeyPoint for drawing
+    kps0_cv = [cv2.KeyPoint(float(x), float(y), 1) for x, y in kpts0_warped]
+    kps1_cv = [cv2.KeyPoint(float(x), float(y), 1) for x, y in kpts1_warped]
+    matches = [cv2.DMatch(i, i, 0) for i in range(len(kpts0))]
+
+    matched_vis = cv2.drawMatches(
+        warped_img0, kps0_cv, warped_img1, kps1_cv, matches, None,
+        matchColor=(0, 255, 0),
+        flags=cv2.DrawMatchesFlags_NOT_DRAW_SINGLE_POINTS
+    )
+
+    cv2.imwrite(save_path, matched_vis)
+
+#def save_matches_in_warped_view(
+#    img0, img1, kpts0, kpts1, K, R, save_path="warped_matches.png"):
+#    """
+#    Warps img1 into img0's view using rotation R and shared intrinsics K.
+#    Then, projects and draws matching keypoints in this warped view.
+#    """
+#
+#    # Convert PyTorch tensor to numpy if needed
+#    if isinstance(img1, torch.Tensor):
+#        img1 = img1.detach().cpu().numpy()
+#        # Convert from [C, H, W] → [H, W, C] if needed
+#        if img1.ndim == 3 and img1.shape[0] in [1, 3]:
+#            img1 = np.transpose(img1, (1, 2, 0))
+#        # Scale to 0–255 and uint8 if it's float
+#        if img1.dtype != np.uint8:
+#            img1 = np.clip(img1 * 255, 0, 255).astype(np.uint8)
+#
+#    if isinstance(img0, torch.Tensor):
+#        img0 = img0.detach().cpu().numpy()
+#        if img0.ndim == 3 and img0.shape[0] in [1, 3]:
+#            img0 = np.transpose(img0, (1, 2, 0))
+#        if img0.dtype != np.uint8:
+#            img0 = np.clip(img0 * 255, 0, 255).astype(np.uint8)
+#
+#    h, w = img0.shape[:2]
+#    # Compute homography for pure rotation
+#    H = K @ R @ np.linalg.inv(K)
+#
+#    warped_img0 = cv2.warpPerspective(img0, H, (w, h))
+#    warped_img1 = cv2.warpPerspective(img1, H, (w, h))
+#
+#    kpts0_h = np.concatenate([kpts0, np.ones((len(kpts0), 1))], axis=1)  # Nx3
+#    kpts0_warped = (H @ kpts0_h.T).T
+#    kpts0_warped = kpts0_warped[:, :2] / kpts0_warped[:, 2:]
+#
+#    kpts1_h = np.concatenate([kpts1, np.ones((len(kpts1), 1))], axis=1)  # Nx3
+#    kpts1_warped = (H @ kpts1_h.T).T
+#    kpts1_warped = kpts1_warped[:, :2] / kpts1_warped[:, 2:]
+#
+#    # Convert to cv2.KeyPoint
+#    kps0_cv = [cv2.KeyPoint(float(x), float(y), 1) for x, y in kpts0_warped]
+#    kps1_cv = [cv2.KeyPoint(float(x), float(y), 1) for x, y in kpts1_warped]
+#    matches = [cv2.DMatch(i, i, 0) for i in range(len(kpts0))]
+#
+#    matched_vis = cv2.drawMatches(
+#        warped_img0, kps0_cv, warped_img1, kps1_cv, matches, None,
+#        matchColor=(0, 255, 0), flags=cv2.DrawMatchesFlags_NOT_DRAW_SINGLE_POINTS
+#    )
+#    cv2.imwrite(save_path, matched_vis)
+
+
 if __name__ == "__main__":
     if not torch.cuda.is_available():
         print("FATAL ERROR: CUDA is required but is not available.")
@@ -209,6 +334,9 @@ if __name__ == "__main__":
 
     print(f'Matches: {matches.shape[0]}')
     print(f'Invalid Matches: {invalid_matches.shape[0]}')
+
+    rotation = R.from_euler('zyx', [0, 0, 55], degrees=True).as_matrix()                        
+    save_matches_in_warped_view(image0, image1, m_kpts0.cpu().numpy(), m_kpts1.cpu().numpy(), feats0['intrinsics'], rotation, save_path="warped_matches.png")
 
     # Save valid matches
     axes = viz2d.plot_images([image0, image1])
