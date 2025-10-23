@@ -297,6 +297,7 @@ class SelfBlock(nn.Module):
         self.Wqkv = nn.Linear(embed_dim, 3 * embed_dim, bias=bias)
         self.inner_attn = Attention(flash)
         self.out_proj = nn.Linear(embed_dim, embed_dim, bias=bias)
+        self.depth_out_proj = nn.Linear(embed_dim, embed_dim, bias=bias)
         self.ffn = nn.Sequential(
             nn.Linear(2 * embed_dim, 2 * embed_dim),
             nn.LayerNorm(2 * embed_dim, elementwise_affine=True),
@@ -308,6 +309,7 @@ class SelfBlock(nn.Module):
         self,
         x: torch.Tensor,
         encoding: torch.Tensor,
+        depth_encoding: torch.Tensor,
         mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         qkv = self.Wqkv(x)
@@ -315,13 +317,16 @@ class SelfBlock(nn.Module):
         q, k, v = qkv[..., 0], qkv[..., 1], qkv[..., 2]
         q = apply_cached_rotary_emb(encoding, q)
         k = apply_cached_rotary_emb(encoding, k)
-        #print("self attn!")
-        #if (mask is None):
-        #    print("no mask!")
-        #else:
-        #    print("has mask!")
         context = self.inner_attn(q, k, v, mask=mask)
         message = self.out_proj(context.transpose(1, 2).flatten(start_dim=-2))
+
+        # Add depth information
+        depth_q = apply_cached_rotary_emb(depth_encoding, q)
+        depth_k = apply_cached_rotary_emb(depth_encoding, k)
+        depth_context = self.inner_attn(depth_q, depth_k, v, mask=mask)
+        depth_message = self.depth_out_proj(depth_context.transpose(1, 2).flatten(start_dim=-2))
+        # TODO: use a network to fuse this? don't use depth_out_proj? pros and cons?
+        message = message + depth_message
 
         return x + self.ffn(torch.cat([x, message], -1))
 
@@ -476,24 +481,26 @@ class TransformerLayer(nn.Module):
         desc1,
         encoding0,
         encoding1,
+        depth_encoding0, 
+        depth_encoding1,
         mask0: Optional[torch.Tensor] = None,
         mask1: Optional[torch.Tensor] = None,
     ):
         if mask0 is not None and mask1 is not None:
-            return self.masked_forward(desc0, desc1, encoding0, encoding1, mask0, mask1)
+            return self.masked_forward(desc0, desc1, encoding0, encoding1, depth_encoding0, depth_encoding1, mask0, mask1)
         else:
-            desc0 = self.self_attn(desc0, encoding0)
-            desc1 = self.self_attn(desc1, encoding1)
+            desc0 = self.self_attn(desc0, encoding0, depth_encoding0)
+            desc1 = self.self_attn(desc1, encoding1, depth_encoding1)
             return self.cross_attn(desc0, desc1)
 
     # This part is compiled and allows padding inputs
-    def masked_forward(self, desc0, desc1, encoding0, encoding1, mask0, mask1):
+    def masked_forward(self, desc0, desc1, encoding0, encoding1, depth_encoding0, depth_encoding1, mask0, mask1):
         mask = mask0 & mask1.transpose(-1, -2)
         mask0 = mask0 & mask0.transpose(-1, -2)
         mask1 = mask1 & mask1.transpose(-1, -2)
         #print("masked forward!")
-        desc0 = self.self_attn(desc0, encoding0, mask0)
-        desc1 = self.self_attn(desc1, encoding1, mask1)
+        desc0 = self.self_attn(desc0, encoding0, depth_encoding0, mask0)
+        desc1 = self.self_attn(desc1, encoding1, depth_encoding1, mask1)
         return self.cross_attn(desc0, desc1, mask)
 
 
@@ -592,7 +599,12 @@ class LightGlue(nn.Module):
 
         head_dim = conf.descriptor_dim // conf.num_heads
         self.posenc = LearnableFourierPositionalEncoding(
-            3, head_dim, head_dim
+        #    3, head_dim, head_dim # This is if using fused keypoint + depth encoding
+            2, head_dim, head_dim
+        )
+
+        self.depthenc = LearnableFourierPositionalEncoding(
+            1, head_dim, head_dim
         )
 
         h, n, d = conf.num_heads, conf.n_layers, conf.descriptor_dim
@@ -730,10 +742,16 @@ class LightGlue(nn.Module):
         desc0 = self.input_proj(desc0)
         desc1 = self.input_proj(desc1)
         # cache position + depth embeddings
-        kpts_with_depth0 = merge_kpts_and_depth(kpts0, depth0)
-        kpts_with_depth1 = merge_kpts_and_depth(kpts1, depth1)
-        encoding0 = self.posenc(kpts_with_depth0)
-        encoding1 = self.posenc(kpts_with_depth1)
+        #kpts_with_depth0 = merge_kpts_and_depth(kpts0, depth0)
+        #kpts_with_depth1 = merge_kpts_and_depth(kpts1, depth1)
+        #encoding0 = self.posenc(kpts_with_depth0)
+        #encoding1 = self.posenc(kpts_with_depth1)
+
+        encoding0 = self.posenc(kpts0)
+        encoding1 = self.posenc(kpts1)
+
+        depth_encoding0 = self.depthenc(depth0)
+        depth_encoding1 = self.depthenc(depth1)
 
         # GNN + final_proj + assignment
         do_early_stop = self.conf.depth_confidence > 0 and not self.training
