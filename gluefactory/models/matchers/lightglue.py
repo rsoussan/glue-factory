@@ -100,27 +100,17 @@ def apply_cached_rotary_emb(freqs_and_P: Tuple[torch.Tensor, torch.Tensor], t: t
 
 
 class LearnableFourierPositionalEncoding(nn.Module):
-    def __init__(self, dim: int, F_dim: int = None, gamma: float = 1.0):
+    def __init__(self, M: int, dim: int, F_dim: int = None, gamma: float = 1.0) -> None:
         super().__init__()
-        F_dim = F_dim if F_dim is not None else dim
-        self.F_dim = F_dim
+        self.F_dim = F_dim if F_dim is not None else dim
         self.gamma = gamma
-
-        # Always create the 2D weights
-        self.Wr2d = nn.Linear(2, F_dim // 2, bias=False)
-        nn.init.normal_(self.Wr2d.weight.data, mean=0, std=self.gamma**-2)
-
-        # Optional 3rd dimension weights
-        if dim == 3:
-            self.Wr3d = nn.Linear(1, F_dim // 2, bias=False)
-            nn.init.normal_(self.Wr3d.weight.data, mean=0, std=self.gamma**-2)
-        else:
-            self.Wr3d = None
+        self.Wr = nn.Linear(M, self.F_dim // 2, bias=False)
+        nn.init.normal_(self.Wr.weight.data, mean=0, std=self.gamma**-2)
 
         # Learnable parameters for the skew-symmetric matrix S.
         # We only need to learn the upper triangular part (excluding the diagonal).
         # TODO: make this optional???
-        num_off_diagonal = F_dim * (F_dim - 1) // 2
+        num_off_diagonal = self.F_dim * (self.F_dim - 1) // 2
         self.skew_params = nn.Parameter(torch.empty(num_off_diagonal))
         nn.init.normal_(self.skew_params, mean=0, std=self.gamma**-2)
 
@@ -145,14 +135,9 @@ class LearnableFourierPositionalEncoding(nn.Module):
         return P
     
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        x: [..., 2] or [..., 3]
-        """
-        out = self.Wr2d(x[..., :2])
-        if self.Wr3d is not None and x.size(-1) == 3:
-            out = out + self.Wr3d(x[..., 2:])
-        cosines, sines = torch.cos(out), torch.sin(out)
+    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        projected = self.Wr(x)
+        cosines, sines = torch.cos(projected), torch.sin(projected)
         emb = torch.stack([cosines, sines], 0).unsqueeze(-3)
         P = self._build_P()
         return emb.repeat_interleave(2, dim=-1), P
@@ -171,25 +156,6 @@ class LearnableFourierPositionalEncoding(nn.Module):
 #        cosines, sines = torch.cos(projected), torch.sin(projected)
 #        emb = torch.stack([cosines, sines], 0).unsqueeze(-3)
 #        return emb.repeat_interleave(2, dim=-1)
-
-class LearnableStringEncoding(nn.Module):
-    def __init__(self, M: int, dim: int, F_dim: int = None, gamma: float = 1.0) -> None:
-        super().__init__()
-        F_dim = F_dim if F_dim is not None else dim
-        self.gamma = gamma
-        self.Wr = nn.Linear(M, F_dim // 2, bias=False)
-        nn.init.normal_(self.Wr.weight.data, mean=0, std=self.gamma**-2)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """encode position vector"""
-        projected = self.Wr(x)
-        cosines, sines = torch.cos(projected), torch.sin(projected)
-        emb = torch.stack([cosines, sines], 0).unsqueeze(-3)
-        return emb.repeat_interleave(2, dim=-1)
-
-
-
-
 
 class TokenConfidence(nn.Module):
     def __init__(self, dim: int) -> None:
@@ -498,7 +464,6 @@ class TransformerLayer(nn.Module):
         mask = mask0 & mask1.transpose(-1, -2)
         mask0 = mask0 & mask0.transpose(-1, -2)
         mask1 = mask1 & mask1.transpose(-1, -2)
-        #print("masked forward!")
         desc0 = self.self_attn(desc0, encoding0, depth_encoding0, mask0)
         desc1 = self.self_attn(desc1, encoding1, depth_encoding1, mask1)
         return self.cross_attn(desc0, desc1, mask)
@@ -650,13 +615,6 @@ class LightGlue(nn.Module):
                 state_dict = {k.replace(*pattern): v for k, v in state_dict.items()}
                 pattern = f"cross_attn.{i}", f"transformers.{i}.cross_attn"
                 state_dict = {k.replace(*pattern): v for k, v in state_dict.items()}
-            # Check for posenc 3d weights, randomly initialize if boostrapping from 2d only
-            if self.posenc.Wr3d is not None:
-                has_posenc_3d = any("posenc.Wr3d" in k for k in state_dict)
-                if has_posenc_3d: 
-                    print("Found 3D weights in checkpoint, using these.")
-                else:
-                    print("No 3D weights in checkpoint, initializing Wr3d randomly.")
             self.load_state_dict(state_dict, strict=False)
 
         self.register_buffer(
@@ -774,12 +732,14 @@ class LightGlue(nn.Module):
                     desc1,
                     encoding0,
                     encoding1,
+                    depth_encoding0, 
+                    depth_encoding1,
                     mask0, 
                     mask1,
                     use_reentrant=False,  # Recommended by torch, default was True
                 )
             else:
-                desc0, desc1 = self.transformers[i](desc0, desc1, encoding0, encoding1, mask0, mask1)
+                desc0, desc1 = self.transformers[i](desc0, desc1, encoding0, encoding1, depth_encoding0, depth_encoding1, mask0, mask1)
             if self.training or i == self.conf.n_layers - 1:
                 all_desc0.append(desc0)
                 all_desc1.append(desc1)
