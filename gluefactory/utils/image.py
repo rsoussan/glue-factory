@@ -158,10 +158,11 @@ def grid_sample(
 
 def get_pixel_grid(
     *,
-    fmap: torch.Tensor | None = None,  # B x H X W X D
-    camera: Camera | None = None,
-    size: Optional[tuple[int, int]] = None,
-    device: torch.device | None = None,
+    #fmap: torch.Tensor | None = None,  # B x H X W X D
+    fmap: Optional[torch.Tensor] = None,
+    camera: Optional[Camera] = None,
+    size: Optional[Tuple[int, int]] = None,
+    device: Optional[torch.device] = None,
     dtype=torch.float32,
     normalized: bool = False,
 ) -> torch.Tensor:
@@ -209,7 +210,8 @@ def hwc_from_chw(image):
     return image.transpose(-3, -2).transpose(-2, -1)
 
 
-def denormalize_coords(coords, hw: tuple[int, int] | None = None) -> torch.Tensor:
+#def denormalize_coords(coords, hw: Tuple[int, int] | None = None) -> torch.Tensor:
+def denormalize_coords(coords, hw: Optional[Tuple[int, int]] = None) -> torch.Tensor:
     """Denormalize coordinates from [-1, 1] to [0, H] or [0, W] (COLMAP)"""
     coords = coords.clone()
     if hw is None:
@@ -219,7 +221,8 @@ def denormalize_coords(coords, hw: tuple[int, int] | None = None) -> torch.Tenso
     return coords
 
 
-def normalize_coords(coords, hw: tuple[int, int] | None = None) -> torch.Tensor:
+#def normalize_coords(coords, hw: Tuple[int, int] | None = None) -> torch.Tensor:
+def normalize_coords(coords, hw: Optional[Tuple[int, int]] = None) -> torch.Tensor:
     """Normalize coordinates from [0, H] or [0, W] (COLMAP) to [-1, 1]"""
     coords = coords.clone()
     if hw is None:
