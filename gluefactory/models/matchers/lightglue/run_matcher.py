@@ -151,7 +151,7 @@ def crop_top_black_rows(img, keypoints, threshold_ratio=0.02):
 
 
 def save_matches_in_warped_view(
-    img0, img1, kpts0, kpts1, K, R, save_path="warped_matches.png"
+    img0, img1, kpts0, kpts1, K, R, color='green', save_path="warped_matches.png"
 ):
     """
     Warps img1 into img0's view using rotation R and shared intrinsics K.
@@ -218,9 +218,13 @@ def save_matches_in_warped_view(
     kps1_cv = [cv2.KeyPoint(float(x), float(y), 1) for x, y in kpts1_warped]
     matches = [cv2.DMatch(i, i, 0) for i in range(len(kpts0))]
 
+    matchColor = (0, 255, 0)
+    if color == 'red':
+        matchColor = (0, 0, 255)
+
     matched_vis = cv2.drawMatches(
         warped_img0, kps0_cv, warped_img1, kps1_cv, matches, None,
-        matchColor=(0, 255, 0),
+        matchColor=matchColor,
         flags=cv2.DrawMatchesFlags_NOT_DRAW_SINGLE_POINTS
     )
 
@@ -239,7 +243,7 @@ if __name__ == "__main__":
     # Load args 
     parser = argparse.ArgumentParser(description="LightGlue matcher.")
     parser.add_argument("--default_lg", action="store_true", help="Use default (pretrained) version of LightGlue")
-    parser.add_argument("--match_threshold", "-m", type=float, default=0.5, help="Matching threshold")
+    parser.add_argument("--match_threshold", "-m", type=float, default=0.1, help="Matching threshold")
     args = parser.parse_args()
 
     # Setup extractor and matcher
@@ -299,6 +303,7 @@ if __name__ == "__main__":
     # Filter matches
     matches, scores, invalid_matches, invalid_scores = filter_matches_by_score(matches, scores, args.match_threshold)
     m_kpts0, m_kpts1 = kpts0[matches[..., 0]], kpts1[matches[..., 1]]
+    invalid_m_kpts0, invalid_m_kpts1 = kpts0[invalid_matches[..., 0]], kpts1[invalid_matches[..., 1]]
 
     image0 = data['view0']['image'][0].cpu()
     image1 = data['view1']['image'][0].cpu()
@@ -309,6 +314,7 @@ if __name__ == "__main__":
 
     rotation = R.from_euler('zyx', [0, 0, 55], degrees=True).as_matrix()                        
     save_matches_in_warped_view(image0, image1, m_kpts0.cpu().numpy(), m_kpts1.cpu().numpy(), feats0['intrinsics'], rotation, save_path="warped_matches.png")
+    save_matches_in_warped_view(image0, image1, invalid_m_kpts0.cpu().numpy(), invalid_m_kpts1.cpu().numpy(), feats0['intrinsics'], rotation, color='red', save_path="warped_invalid_matches.png")
 
     # Save valid matches
     axes = viz2d.plot_images([image0, image1])
