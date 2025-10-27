@@ -614,6 +614,15 @@ def detect_features_and_unwarp(
         warped_keypoints, descriptors, scores = filter_keypoints_near_warped_boundary(warped_keypoints, descriptors, scores, H, patch_size, border_thresh=5, warped_patch=image, save_path=f"patch_keypoints_{x}_{y}.png", draw_keypoints=True)
         keypoints = np.array([kp.pt for kp in warped_keypoints], dtype=np.float32)
 
+    # Check if all keypoints removed after filtering boundaries, return empty if so
+    if keypoints.shape[0] == 0:
+        unwarped_pred = {
+            "keypoints": torch.zeros((0, 2)),
+            "keypoint_scores": torch.zeros((0,)),
+            "descriptors": torch.zeros((0, descriptors.shape[1]) if descriptors.size else (0, 256)),
+        }
+        return [], np.zeros((0, descriptors.shape[1])), unwarped_pred
+
     # Add new descriptors
     descriptors_all.append(descriptors)
 
@@ -883,7 +892,7 @@ if __name__ == "__main__":
    
     h, w = rgb_image.shape[:2] 
     # Constants
-    PATCH_SIZE_FACTOR = 4 
+    PATCH_SIZE_FACTOR = 1 
     # Assumes square image. TODO: account for non square images...
     PATCH_SIZE = w // PATCH_SIZE_FACTOR # This should be 64
     MAX_WARPED_DIM_MULTIPLIER = 3 

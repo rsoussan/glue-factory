@@ -1,4 +1,5 @@
 import os
+import re
 import subprocess
 import shutil
 import argparse
@@ -62,10 +63,16 @@ def run_matchers_in_patch_data_dirs(base_dir, output_dir):
         pdf_path = os.path.join(output_dir, "all_match_results.pdf")
         create_combined_pdf(all_results, pdf_path)
 
+def natural_key(pair):
+    """Generate a natural sort key from the image path."""
+    path = pair[0]
+    return [int(t) if t.isdigit() else t.lower() for t in re.split(r'(\d+)', path)]
 
 def create_combined_pdf(image_title_pairs, output_pdf):
     """Combine PNGs into one PDF, labeling each page with the file and directory name."""
     pages = []
+    # Sort in-place
+    image_title_pairs.sort(key=natural_key)
 
     for img_path, title in image_title_pairs:
         img = Image.open(img_path).convert("RGB")
