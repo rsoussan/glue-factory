@@ -96,6 +96,18 @@ def save_tensor_as_image(tensor: torch.Tensor, filename: str, normalize_range='m
     
     save_image(normalized_tensor.clamp(0.0, 1.0), filename)
 
+def filter_top_keypoints(keypoints, descriptors, max_count):
+    scores = np.array([kp.response for kp in keypoints], dtype=float)
+    if len(scores) == 0:
+        return keypoints, descriptors
+
+    idxs = np.argsort(-scores)[:max_count]
+
+    # Keep keypoints as list
+    keypoints = [keypoints[i] for i in idxs]
+    descriptors = descriptors[idxs]
+    return keypoints, descriptors 
+
 def filter_bottom_percent_keypoints(keypoints, bottom_percent):
     responses = np.array([kp.response for kp in keypoints], dtype=float)
     threshold = np.quantile(responses, bottom_percent)
@@ -666,12 +678,13 @@ def detect_features_from_patches(rgb_img, normals, patch_warper, feature_detecto
     
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     feature_detector = None
+    KEYPOINTS_PER_PATCH = int(2048)#/patch_warper.patch_size) #int(2048/(PATCH_SIZE*PATCH_SIZE_FACTOR))
     if feature_detector_name == 'disk':
-        feature_detector = DISK(max_num_keypoints=int(2048/(PATCH_SIZE_FACTOR*PATCH_SIZE_FACTOR))).eval().to(device) 
+        feature_detector = DISK(max_num_keypoints=KEYPOINTS_PER_PATCH).eval().to(device) 
     elif feature_detector_name == 'sift':
-        feature_detector = SIFT(max_num_keypoints=int(2048/(PATCH_SIZE_FACTOR*PATCH_SIZE_FACTOR))).eval().to(device) 
+        feature_detector = SIFT(max_num_keypoints=KEYPOINTS_PER_PATCH).eval().to(device) 
     elif feature_detector_name == 'superpoint':
-        feature_detector = SuperPoint(max_num_keypoints=int(2048/(PATCH_SIZE_FACTOR*PATCH_SIZE_FACTOR))).eval().to(device) 
+        feature_detector = SuperPoint(max_num_keypoints=KEYPOINTS_PER_PATCH).eval().to(device) 
     else:
         print(f"Invalid feature detector: {feature_detector_name}")
         sys.exit(1)
@@ -892,15 +905,17 @@ if __name__ == "__main__":
    
     h, w = rgb_image.shape[:2] 
     # Constants
-    PATCH_SIZE_FACTOR = 1 
+    PATCH_SIZE_FACTOR = 8 
     # Assumes square image. TODO: account for non square images...
     PATCH_SIZE = w // PATCH_SIZE_FACTOR # This should be 64
-    MAX_WARPED_DIM_MULTIPLIER = 3 
+    MAX_WARPED_DIM_MULTIPLIER = 10 
     BORDER_MODE = cv2.BORDER_CONSTANT 
         
     normals = get_normals(depth_image, K, device)
     patch_warper = PatchWarper(K, PATCH_SIZE, PATCH_SIZE_FACTOR, MAX_WARPED_DIM_MULTIPLIER, BORDER_MODE, args.fixed_pitch)
     keypoints, descriptors, patches = detect_features_from_patches(rgb_image, normals, patch_warper, args.feature_detector)
+    MAX_KEYPOINTS = 2048
+    keypoints, descriptors = filter_top_keypoints(keypoints, descriptors, MAX_KEYPOINTS)
     save_data(keypoints, descriptors, rgb_tensor, depth_tensor, K, args.feature_detector, f"features_{args.data_prefix}.pt")
     print("\n--- Feature Extraction Summary ---")
     print(f"Total Keypoints Detected: {len(keypoints)}")
