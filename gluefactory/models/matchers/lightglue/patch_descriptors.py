@@ -8,10 +8,10 @@ from torchvision.utils import save_image
 from PIL import Image
 import math
 from typing import Union, Tuple 
+from scipy.spatial.transform import Rotation as R
 from disk import DISK
 from sift import SIFT
 from superpoint import SuperPoint
-from scipy.spatial.transform import Rotation as R
 from gluefactory.geometry.depth import sample_normals_from_depth
 from dataclasses import dataclass
 
@@ -879,6 +879,73 @@ def create_original_vs_warped_patches_mosaic_image(patches, patch_size, max_warp
 
     return comparison_mosaic
 
+# TODO: put this somewhere common, shared with run_matcher.py
+def crop_top_black_rows(img, keypoints, threshold_ratio=0.02):
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) if img.ndim == 3 else img
+    h, w = gray.shape
+    non_black_counts = np.count_nonzero(gray > 0, axis=1)
+    row_threshold = threshold_ratio * w
+
+    valid_rows = np.where(non_black_counts >= row_threshold)[0]
+    if len(valid_rows) > 0:
+        crop_top = int(valid_rows[0])
+        cropped_img = img[crop_top:, :]
+        cropped_keypoints = keypoints.copy()
+        cropped_keypoints[:, 1] -= crop_top
+    else:
+        cropped_img = img
+        cropped_keypoints = keypoints.copy()
+
+    return cropped_img, cropped_keypoints
+
+# TODO: merge some of this code with run_matcher save_matches_in_warped_view
+def save_keypoints_in_warped_view(img, kpts, K, rotation, save_path="warped_keypoints.png"):
+    h, w = img.shape[:2]
+    threshold_ratio = 0.5
+    img, kpts = crop_top_black_rows(img, kpts, threshold_ratio)
+
+    # Compute homography for pure rotation
+    H = K @ rotation @ np.linalg.inv(K)
+
+    # Warp the corners of the image to find extents
+    corners = np.array([[0, 0, 1],
+                        [w, 0, 1],
+                        [w, h, 1],
+                        [0, h, 1]], dtype=np.float32).T  # 3x4
+    warped_corners = H @ corners
+    warped_corners /= warped_corners[2, :]
+    warped_corners = warped_corners[:2, :].T  # 4x2
+
+    # Compute bounding box of warped image
+    min_xy = warped_corners.min(axis=0)
+    max_xy = warped_corners.max(axis=0)
+    warped_size = max_xy - min_xy
+
+    # Compute scale to fit warped image back into (w, h)
+    scale = min(w / warped_size[0], h / warped_size[1])
+    tx, ty = -min_xy * scale  # translation to shift into view
+    S = np.array([[scale, 0, tx],
+                  [0, scale, ty],
+                  [0, 0, 1]], dtype=np.float32)
+
+    # Apply the scaled+translated homography
+    H_adj = S @ H
+    warped_img = cv2.warpPerspective(img, H_adj, (w, h))
+
+    # Warp keypoints
+    def warp_kpts(kpts):
+        kpts_h = np.concatenate([kpts, np.ones((len(kpts), 1))], axis=1)
+        kpts_w = (H_adj @ kpts_h.T).T
+        return kpts_w[:, :2] / kpts_w[:, 2:]
+
+    kpts_warped = warp_kpts(kpts)
+
+    # Convert to cv2.KeyPoint for drawing
+    kpts_cv = [cv2.KeyPoint(float(x), float(y), 1) for x, y in kpts_warped]
+
+    keypoint_image = cv2.drawKeypoints(image=warped_img, keypoints=kpts_cv, outImage=None, color=(0, 255, 0), flags=cv2.DRAW_MATCHES_FLAGS_DRAW_RICH_KEYPOINTS)
+    cv2.imwrite(save_path, keypoint_image)
+
 if __name__ == "__main__":
     if not torch.cuda.is_available():
         print("FATAL ERROR: CUDA is required but is not available.")
@@ -937,6 +1004,9 @@ if __name__ == "__main__":
     # Save keypoint image
     keypoint_image = create_keypoint_image(keypoints, rgb_image, PATCH_SIZE)
     cv2.imwrite("keypoints.png", keypoint_image)
+    rotation = R.from_euler('zyx', [0, 0, 55], degrees=True).as_matrix()                        
+    keypoints_np = np.array([kp.pt for kp in keypoints], dtype=np.float32)
+    warped_keypoint_image = save_keypoints_in_warped_view(rgb_image, keypoints_np, K, rotation, save_path="warped_keypoints.png")
     
     # Save warped patches mosaic
     warped_patches_mosaic_image = create_warped_patches_mosaic_image(patches, h, w)
