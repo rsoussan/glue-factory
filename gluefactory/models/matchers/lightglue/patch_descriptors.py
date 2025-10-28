@@ -526,7 +526,7 @@ class PatchWarper:
 
         return (scaled_width, scaled_height), H_shift_scale
 
-    def get_warping_params(self, x: float, y: float, R) -> Union[Tuple[np.ndarray, Tuple[int, int], np.ndarray], Tuple[None, None, None]]:
+    def get_warping_params(self, x: float, y: float, R, shift_about_patch_center = True) -> Union[Tuple[np.ndarray, Tuple[int, int], np.ndarray], Tuple[None, None, None]]:
         """
         Calculates H_geo, warped_dims, and H_final for the current patch.
         Returns H_geo, (W, H), H_final
@@ -534,9 +534,12 @@ class PatchWarper:
       
         # Adjust principal point based on patch location  
         K = self.original_K.copy()
-        K[0, 2] -= x # cx
-        K[1, 2] -= y # cy
-        #K = scale_intrinsics(K, self.patch_size_factor) 
+        if shift_about_patch_center:
+            K[0, 2] = self.patch_size//2 # cx
+            K[1, 2] = self.patch_size//2 # cx
+        else:
+            K[0, 2] -= x # cx
+            K[1, 2] -= y # cy
  
         K_inv = np.linalg.inv(K)
         H_geo = K @ R @ K_inv
@@ -554,7 +557,7 @@ class PatchWarper:
             print("Invalid mean normal, not applying rotation.")
             return np.eye(3)
         rotation = rotation_matrix_from_vectors(mean_normal, self.target_normal)
-        return clamp_rotation_rpy(rotation, [55, 55, 55])    
+        return clamp_rotation_rpy(rotation, [70, 70, 70])    
 
     def warp_patch(self, rgb_patch, x, y, mean_normal):
         R = self.get_rotation(mean_normal)
@@ -972,7 +975,7 @@ if __name__ == "__main__":
    
     h, w = rgb_image.shape[:2] 
     # Constants
-    PATCH_SIZE_FACTOR = 8 
+    PATCH_SIZE_FACTOR = 2 
     # Assumes square image. TODO: account for non square images...
     PATCH_SIZE = w // PATCH_SIZE_FACTOR # This should be 64
     MAX_WARPED_DIM_MULTIPLIER = 10 
