@@ -526,7 +526,7 @@ class PatchWarper:
 
         return (scaled_width, scaled_height), H_shift_scale
 
-    def get_warping_params(self, x: float, y: float, R, shift_about_patch_center = True) -> Union[Tuple[np.ndarray, Tuple[int, int], np.ndarray], Tuple[None, None, None]]:
+    def get_warping_params(self, x: float, y: float, R, shift_about_patch_center = False) -> Union[Tuple[np.ndarray, Tuple[int, int], np.ndarray], Tuple[None, None, None]]:
         """
         Calculates H_geo, warped_dims, and H_final for the current patch.
         Returns H_geo, (W, H), H_final
@@ -703,6 +703,7 @@ def detect_features_from_patches(rgb_img, normals, patch_warper, feature_detecto
             normal_patch = normals[y:y_end, x:x_end]
             mean_normal = patch_mean_normal(normal_patch) 
             warped_patch, H = patch_warper.warp_patch(rgb_patch, x, y, mean_normal)
+             
             # TODO: don't convert to grayscale? -> make this optional!! (BB) 
             #gray_warped_patch = cv2.cvtColor(warped_patch, cv2.COLOR_BGR2GRAY)
             warped_keypoints = []
@@ -730,6 +731,21 @@ def create_keypoint_image(keypoints, rgb_image, patch_size):
         for x in range(0, w - patch_size + 1, patch_size):
             cv2.rectangle(keypoint_image, (x, y), (x + patch_size, y + patch_size), (255, 0, 0), 1)
     return keypoint_image
+
+def resize_with_aspect_ratio(image, target_width, target_height):
+    h, w = image.shape[:2]
+    scale = min(target_width / w, target_height / h)
+    new_w, new_h = int(w * scale), int(h * scale)
+    resized = cv2.resize(image, (new_w, new_h), interpolation=cv2.INTER_AREA)
+
+    # pad to target size (optional)
+    top = (target_height - new_h) // 2
+    bottom = target_height - new_h - top
+    left = (target_width - new_w) // 2
+    right = target_width - new_w - left
+    padded = cv2.copyMakeBorder(resized, top, bottom, left, right,
+                                cv2.BORDER_CONSTANT, value=(0, 0, 0))
+    return padded
  
 
 def create_warped_patches_mosaic_image(patches, h, w, draw_keypoints = False, filter_keypoints_bottom_percent=None):
@@ -737,7 +753,6 @@ def create_warped_patches_mosaic_image(patches, h, w, draw_keypoints = False, fi
     for patch in patches:
         x = patch.x
         y = patch.y
-        # Assumes square patches
         patch_size = patch.rgb_patch.shape[0]
         y_end = y + patch_size
         x_end = x + patch_size
@@ -748,11 +763,7 @@ def create_warped_patches_mosaic_image(patches, h, w, draw_keypoints = False, fi
             if filter_keypoints_bottom_percent is not None:
                 keypoints = filter_bottom_percent_keypoints(keypoints, filter_keypoints_bottom_percent)  
             warped_patch = cv2.drawKeypoints(image=warped_patch, keypoints=keypoints, outImage=None, color=(0, 255, 0), flags=cv2.DRAW_MATCHES_FLAGS_DRAW_RICH_KEYPOINTS)
-        resized_warped_patch = cv2.resize(
-            warped_patch, 
-            (patch_size, patch_size), 
-            interpolation=cv2.INTER_LINEAR
-        )
+        resized_warped_patch = resize_with_aspect_ratio(warped_patch, patch_size, patch_size) 
         mosaic_image[y:y_end, x:x_end] = resized_warped_patch
     return mosaic_image
 
@@ -975,10 +986,10 @@ if __name__ == "__main__":
    
     h, w = rgb_image.shape[:2] 
     # Constants
-    PATCH_SIZE_FACTOR = 2 
+    PATCH_SIZE_FACTOR = 4 
     # Assumes square image. TODO: account for non square images...
     PATCH_SIZE = w // PATCH_SIZE_FACTOR # This should be 64
-    MAX_WARPED_DIM_MULTIPLIER = 10 
+    MAX_WARPED_DIM_MULTIPLIER = 5 
     BORDER_MODE = cv2.BORDER_CONSTANT 
         
     normals = get_normals(depth_image, K, device)
