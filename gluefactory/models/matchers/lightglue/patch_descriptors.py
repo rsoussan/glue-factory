@@ -536,12 +536,9 @@ class PatchWarper:
         max_dim = self.max_warped_dim
         scale_w = min(1.0, max_dim / raw_width) if raw_width > 0 else 1.0
         scale_h = min(1.0, max_dim / raw_height) if raw_height > 0 else 1.0
-        #scale_w = max_dim / raw_width
-        #scale_h = max_dim / raw_height
  
         # Use the most restrictive (smallest) scale factor to ensure both dimensions fit
         scale_factor = min(scale_w, scale_h)
-        #scale_factor = max(scale_w, scale_h)
 
         # Calculate final output dimensions 
         # Apply the scaling to the raw extent and then convert to the final output integer size.
@@ -742,7 +739,11 @@ def detect_features_from_patches(rgb_img, normals, patch_warper, feature_detecto
     
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     feature_detector = None
-    KEYPOINTS_PER_PATCH = int(2048)#/patch_warper.patch_size) #int(2048/(PATCH_SIZE*PATCH_SIZE_FACTOR))
+    # TODO: make 2048 an argument!!!
+    #KEYPOINTS_PER_PATCH = int(2048)
+    #KEYPOINTS_PER_PATCH = int(2048/patch_warper.patch_size_factor) #int(2048/(PATCH_SIZE*PATCH_SIZE_FACTOR))
+    KEYPOINTS_PER_PATCH = int(2048/(patch_warper.patch_size_factor*patch_warper.patch_size_factor)) #int(2048/(PATCH_SIZE*PATCH_SIZE_FACTOR))
+    print(f"Keypoints per patch: {KEYPOINTS_PER_PATCH}")
     if feature_detector_name == 'disk':
         feature_detector = DISK(max_num_keypoints=KEYPOINTS_PER_PATCH).eval().to(device) 
     elif feature_detector_name == 'sift':
@@ -1050,7 +1051,7 @@ if __name__ == "__main__":
     PATCH_SIZE_FACTOR = 2 
     # Assumes square image. TODO: account for non square images...
     PATCH_SIZE = w // PATCH_SIZE_FACTOR # This should be 64
-    MAX_WARPED_DIM_MULTIPLIER = 1 
+    MAX_WARPED_DIM_MULTIPLIER = 3 
     BORDER_MODE = cv2.BORDER_CONSTANT 
         
     normals = get_normals(depth_image, K, device)
