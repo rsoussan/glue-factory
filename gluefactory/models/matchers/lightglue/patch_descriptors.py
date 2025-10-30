@@ -67,6 +67,46 @@ def scale_intrinsics(K: np.ndarray, patch_scale_factor: float) -> np.ndarray:
     K_scaled[1, 2] *= scale
     return K_scaled.astype(np.float32)
 
+def calculate_crop_region(image, black_thresh=10, convex_fit=True):
+    """
+    Crop an image to its largest valid contoured region.
+
+    Args:
+        image (np.ndarray): Input image (grayscale or color).
+        black_thresh (int): Pixel intensity threshold for "non-black" region.
+        convex_fit (bool): Whether to fit a convex hull around the largest contour.
+
+    Returns:
+        cropped_img (np.ndarray): Cropped image region.
+        contour (np.ndarray): The contour or convex hull used for cropping.
+    """
+    # Convert to grayscale if needed
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if image.ndim == 3 else image
+
+    # Binary mask of non-black pixels
+    mask = (gray > black_thresh).astype(np.uint8) * 255
+
+    # Find contours
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
+        # No valid contour found — return original image
+        return image, None
+
+    # Find the largest contour
+    largest_contour = max(contours, key=cv2.contourArea)
+
+    # Optionally tighten using convex hull
+    contour = cv2.convexHull(largest_contour) if convex_fit else largest_contour
+
+    # Compute bounding box
+    x, y, w, h = cv2.boundingRect(contour)
+
+    # Crop image
+    #cropped_img = image[y:y+h, x:x+w]
+
+    return (x, y, w, h) 
+
+
 def save_tensor_as_image(tensor: torch.Tensor, filename: str, normalize_range='min_max'):
     """Saves a float tensor as an image."""
     if tensor.ndim == 2:
@@ -462,21 +502,13 @@ class PatchWarper:
         self.max_warped_dim = int(self.patch_size * max_warped_dim_multiplier)
         self.border_mode = border_mode
         self.target_normal = np.array([0, 0, -1], dtype=np.float32)
-
-        self.patch_corners_homogeneous = np.array([
-            [0, 0, 1],                # Top-Left
-            [patch_size, 0, 1],       # Top-Right
-            [0, patch_size, 1],       # Bottom-Left
-            [patch_size, patch_size, 1] # Bottom-Right
-        ], dtype=np.float32).T # Shape (3, 4)
-
         self.R_fixed = None 
         if pitch_degrees is not None:
             # In the camera frame, pitching is around the x axis, so technically its roll
             self.R_fixed = rotation_matrix_from_rpy([pitch_degrees, 0, 0])
 
-    def _calculate_warped_dims_and_shift(self, homography: np.ndarray) -> Tuple[Tuple[int, int], np.ndarray]:
-        warped_corners_homogeneous = homography @ self.patch_corners_homogeneous 
+    def _calculate_warped_dims_and_shift(self, homography: np.ndarray, patch_corners_homogeneous) -> Tuple[Tuple[int, int], np.ndarray]:
+        warped_corners_homogeneous = homography @ patch_corners_homogeneous 
         z_coords = warped_corners_homogeneous[2, :]
         # Guard against zero or near-zero division (singularity)
         z_coords = np.where(np.abs(z_coords) < 1e-6, np.inf, z_coords)
@@ -504,8 +536,12 @@ class PatchWarper:
         max_dim = self.max_warped_dim
         scale_w = min(1.0, max_dim / raw_width) if raw_width > 0 else 1.0
         scale_h = min(1.0, max_dim / raw_height) if raw_height > 0 else 1.0
+        #scale_w = max_dim / raw_width
+        #scale_h = max_dim / raw_height
+ 
         # Use the most restrictive (smallest) scale factor to ensure both dimensions fit
         scale_factor = min(scale_w, scale_h)
+        #scale_factor = max(scale_w, scale_h)
 
         # Calculate final output dimensions 
         # Apply the scaling to the raw extent and then convert to the final output integer size.
@@ -526,11 +562,12 @@ class PatchWarper:
 
         return (scaled_width, scaled_height), H_shift_scale
 
-    def get_warping_params(self, x: float, y: float, R, shift_about_patch_center = False) -> Union[Tuple[np.ndarray, Tuple[int, int], np.ndarray], Tuple[None, None, None]]:
+    def get_warping_params(self, x: float, y: float, R, crop_region, shift_about_patch_center = False) -> Union[Tuple[np.ndarray, Tuple[int, int], np.ndarray], Tuple[None, None, None]]:
         """
         Calculates H_geo, warped_dims, and H_final for the current patch.
         Returns H_geo, (W, H), H_final
         """
+        crop_x, crop_y, w, h = crop_region 
       
         # Adjust principal point based on patch location  
         K = self.original_K.copy()
@@ -538,15 +575,34 @@ class PatchWarper:
             K[0, 2] = self.patch_size//2 # cx
             K[1, 2] = self.patch_size//2 # cx
         else:
-            K[0, 2] -= x # cx
-            K[1, 2] -= y # cy
+            K[0, 2] -= (crop_x + x) # cx
+            K[1, 2] -= (crop_y + y) # cy
  
         K_inv = np.linalg.inv(K)
         H_geo = K @ R @ K_inv
-        
+      
+        H_crop = np.array([
+            [1, 0, -1*crop_x], 
+            [0, 1, -1*crop_y], 
+            [0, 0, 1]
+        ], dtype=np.float32)
+
+        #patch_corners_homogeneous = np.array([
+        #    [crop_x, crop_y, 1],                # Top-Left
+        #    [crop_x + w, crop_y, 1],       # Top-Right
+        #    [crop_x, crop_y + h, 1],       # Bottom-Left
+        #    [crop_x + w, crop_y + h, 1] # Bottom-Right
+        #], dtype=np.float32).T # Shape (3, 4)
+        patch_corners_homogeneous = np.array([
+            [0, 0, 1],                # Top-Left
+            [w, 0, 1],       # Top-Right
+            [0, h, 1],       # Bottom-Left
+            [w, h, 1] # Bottom-Right
+        ], dtype=np.float32).T # Shape (3, 4)
+
         # This call now performs the size capping and determines the necessary scale/shift matrix
-        warped_dims, H_shift_scale = self._calculate_warped_dims_and_shift(H_geo)
-        H_final = H_shift_scale @ H_geo
+        warped_dims, H_shift_scale = self._calculate_warped_dims_and_shift(H_geo, patch_corners_homogeneous)
+        H_final = H_shift_scale @ H_geo @ H_crop
         return warped_dims, H_final
 
     def get_rotation(self, mean_normal):
@@ -561,7 +617,8 @@ class PatchWarper:
 
     def warp_patch(self, rgb_patch, x, y, mean_normal):
         R = self.get_rotation(mean_normal)
-        warped_dims, H_final = self.get_warping_params(x, y, R)
+        crop_region = calculate_crop_region(rgb_patch, black_thresh=10, convex_fit=True)
+        warped_dims, H_final = self.get_warping_params(x, y, R, crop_region)
         if H_final is None:
             print(f"H final is none!")
             return None, None 
@@ -624,6 +681,10 @@ def detect_features_and_unwarp(
             octave=0
         )
         warped_keypoints.append(keypoint)
+    
+    keypoint_image = cv2.drawKeypoints(image=image, keypoints=warped_keypoints, outImage=None, color=(0, 255, 0), flags=cv2.DRAW_MATCHES_FLAGS_DRAW_RICH_KEYPOINTS)
+    cv2.imwrite(f"warped_patch_keypoints_{x}_{y}.png", keypoint_image)
+    
 
     if filter_boundary_keypoints:
         warped_keypoints, descriptors, scores = filter_keypoints_near_warped_boundary(warped_keypoints, descriptors, scores, H, patch_size, border_thresh=5, warped_patch=image, save_path=f"patch_keypoints_{x}_{y}.png", draw_keypoints=True)
@@ -986,10 +1047,10 @@ if __name__ == "__main__":
    
     h, w = rgb_image.shape[:2] 
     # Constants
-    PATCH_SIZE_FACTOR = 4 
+    PATCH_SIZE_FACTOR = 2 
     # Assumes square image. TODO: account for non square images...
     PATCH_SIZE = w // PATCH_SIZE_FACTOR # This should be 64
-    MAX_WARPED_DIM_MULTIPLIER = 5 
+    MAX_WARPED_DIM_MULTIPLIER = 1 
     BORDER_MODE = cv2.BORDER_CONSTANT 
         
     normals = get_normals(depth_image, K, device)
