@@ -1,4 +1,5 @@
 import numpy as np
+import time
 import sys
 import os
 import argparse
@@ -14,6 +15,7 @@ from sift import SIFT
 from superpoint import SuperPoint
 from gluefactory.geometry.depth import sample_normals_from_depth
 from dataclasses import dataclass
+from typing import Optional
 
 def mean_normal(normals: np.ndarray) -> np.ndarray:
     # Align normals so they point roughly in the same hemisphere
@@ -90,7 +92,10 @@ def calculate_crop_region(image, black_thresh=10, convex_fit=True):
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     if not contours:
         # No valid contour found — return original image
-        return image, None
+        print(f"No contours found.")
+        h = image.shape[0]
+        w = image.shape[1]
+        return (0, 0, w, h) 
 
     # Find the largest contour
     largest_contour = max(contours, key=cv2.contourArea)
@@ -564,6 +569,7 @@ class PatchWarper:
         Calculates H_geo, warped_dims, and H_final for the current patch.
         Returns H_geo, (W, H), H_final
         """
+        print(f"crop region: {crop_region}")
         crop_x, crop_y, w, h = crop_region 
       
         # Adjust principal point based on patch location  
@@ -627,6 +633,8 @@ class PatchWarper:
             flags=cv2.INTER_LINEAR,
             borderMode=self.border_mode
         )
+
+        #warped_patch = upscale_edsr(warped_patch, scale=4)
         return warped_patch, H_final
 
 def detect_features_and_unwarp(
@@ -681,6 +689,7 @@ def detect_features_and_unwarp(
     
     keypoint_image = cv2.drawKeypoints(image=image, keypoints=warped_keypoints, outImage=None, color=(0, 255, 0), flags=cv2.DRAW_MATCHES_FLAGS_DRAW_RICH_KEYPOINTS)
     cv2.imwrite(f"warped_patch_keypoints_{x}_{y}.png", keypoint_image)
+    cv2.imwrite(f"warped_patch_{x}_{y}.png", image)
     
 
     if filter_boundary_keypoints:
@@ -731,6 +740,23 @@ def detect_features_and_unwarp(
 
     return unwarped_pred
 
+def get_feature_detector(feature_detector_name, image):
+    h, w = image.shape[:2]
+    KEYPOINTS_PER_PATCH = int(np.cbrt(h*w))
+    print(f"Keypoints per patch: {KEYPOINTS_PER_PATCH}")
+    feature_detector = None
+    if feature_detector_name == 'disk':
+        feature_detector = DISK(max_num_keypoints=KEYPOINTS_PER_PATCH).eval().to(device) 
+    elif feature_detector_name == 'sift':
+        feature_detector = SIFT(max_num_keypoints=KEYPOINTS_PER_PATCH).eval().to(device) 
+    elif feature_detector_name == 'superpoint':
+        feature_detector = SuperPoint(max_num_keypoints=KEYPOINTS_PER_PATCH).eval().to(device) 
+    else:
+        print(f"Invalid feature detector: {feature_detector_name}")
+        sys.exit(1)
+    return feature_detector 
+ 
+
 def detect_features_from_patches(rgb_img, normals, patch_warper, feature_detector_name):
     """
     Extracts features after warping patches based on mean normal or fixed pitch rotation.
@@ -744,15 +770,15 @@ def detect_features_from_patches(rgb_img, normals, patch_warper, feature_detecto
     #KEYPOINTS_PER_PATCH = int(2048/patch_warper.patch_size_factor) #int(2048/(PATCH_SIZE*PATCH_SIZE_FACTOR))
     KEYPOINTS_PER_PATCH = int(2048/(patch_warper.patch_size_factor*patch_warper.patch_size_factor)) #int(2048/(PATCH_SIZE*PATCH_SIZE_FACTOR))
     print(f"Keypoints per patch: {KEYPOINTS_PER_PATCH}")
-    if feature_detector_name == 'disk':
-        feature_detector = DISK(max_num_keypoints=KEYPOINTS_PER_PATCH).eval().to(device) 
-    elif feature_detector_name == 'sift':
-        feature_detector = SIFT(max_num_keypoints=KEYPOINTS_PER_PATCH).eval().to(device) 
-    elif feature_detector_name == 'superpoint':
-        feature_detector = SuperPoint(max_num_keypoints=KEYPOINTS_PER_PATCH).eval().to(device) 
-    else:
-        print(f"Invalid feature detector: {feature_detector_name}")
-        sys.exit(1)
+#    if feature_detector_name == 'disk':
+#        feature_detector = DISK(max_num_keypoints=KEYPOINTS_PER_PATCH).eval().to(device) 
+#    elif feature_detector_name == 'sift':
+#        feature_detector = SIFT(max_num_keypoints=KEYPOINTS_PER_PATCH).eval().to(device) 
+#    elif feature_detector_name == 'superpoint':
+#        feature_detector = SuperPoint(max_num_keypoints=KEYPOINTS_PER_PATCH).eval().to(device) 
+#    else:
+#        print(f"Invalid feature detector: {feature_detector_name}")
+#        sys.exit(1)
     keypoints_all = []
     descriptors_all = []
     patches = []
@@ -769,6 +795,7 @@ def detect_features_from_patches(rgb_img, normals, patch_warper, feature_detecto
             # TODO: don't convert to grayscale? -> make this optional!! (BB) 
             #gray_warped_patch = cv2.cvtColor(warped_patch, cv2.COLOR_BGR2GRAY)
             warped_keypoints = []
+            feature_detector = get_feature_detector(feature_detector_name, warped_patch)
             detect_features_and_unwarp(
                 feature_detector,
                 warped_patch,
@@ -1031,7 +1058,7 @@ if __name__ == "__main__":
      
     parser = argparse.ArgumentParser(description="Patch-based feature extractor.")
     parser.add_argument("data_path", help="Path to the PyTorch .pt data file.")
-    parser.add_argument("--feature_detector", type=str, default='disk', help="disk, sift, or superpoint")
+    parser.add_argument("--feature_detector", type=str, default='superpoint', help="disk, sift, or superpoint")
     parser.add_argument("--fixed_pitch", type=float, default=None, help="If provided, use a fixed pitch rotation (degrees) instead of rotations derived from depth normals.")
     parser.add_argument("--data_prefix", type=str, default='0', help="Data to load, can be 0 or 1.")
     args = parser.parse_args()
@@ -1048,7 +1075,7 @@ if __name__ == "__main__":
    
     h, w = rgb_image.shape[:2] 
     # Constants
-    PATCH_SIZE_FACTOR = 2 
+    PATCH_SIZE_FACTOR = 8 
     # Assumes square image. TODO: account for non square images...
     PATCH_SIZE = w // PATCH_SIZE_FACTOR # This should be 64
     MAX_WARPED_DIM_MULTIPLIER = 3 
@@ -1058,7 +1085,7 @@ if __name__ == "__main__":
     patch_warper = PatchWarper(K, PATCH_SIZE, PATCH_SIZE_FACTOR, MAX_WARPED_DIM_MULTIPLIER, BORDER_MODE, args.fixed_pitch)
     keypoints, descriptors, patches = detect_features_from_patches(rgb_image, normals, patch_warper, args.feature_detector)
     MAX_KEYPOINTS = 2048
-    keypoints, descriptors = filter_top_keypoints(keypoints, descriptors, MAX_KEYPOINTS)
+    #keypoints, descriptors = filter_top_keypoints(keypoints, descriptors, MAX_KEYPOINTS)
     save_data(keypoints, descriptors, rgb_tensor, depth_tensor, K, args.feature_detector, f"features_{args.data_prefix}.pt")
     print("\n--- Feature Extraction Summary ---")
     print(f"Total Keypoints Detected: {len(keypoints)}")
