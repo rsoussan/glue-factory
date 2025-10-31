@@ -562,7 +562,7 @@ class PatchWarper:
             [0, 0, 1]
         ], dtype=np.float32)
 
-        return (scaled_width, scaled_height), H_shift_scale
+        return (scaled_width, scaled_height), H_shift_scale, (raw_width, raw_height)
 
     def get_warping_params(self, x: float, y: float, R, crop_region, shift_about_patch_center = False) -> Union[Tuple[np.ndarray, Tuple[int, int], np.ndarray], Tuple[None, None, None]]:
         """
@@ -604,9 +604,9 @@ class PatchWarper:
         ], dtype=np.float32).T # Shape (3, 4)
 
         # This call now performs the size capping and determines the necessary scale/shift matrix
-        warped_dims, H_shift_scale = self._calculate_warped_dims_and_shift(H_geo, patch_corners_homogeneous)
+        warped_dims, H_shift_scale, raw_warped_dims = self._calculate_warped_dims_and_shift(H_geo, patch_corners_homogeneous)
         H_final = H_shift_scale @ H_geo @ H_crop
-        return warped_dims, H_final
+        return warped_dims, H_final, raw_warped_dims
 
     def get_rotation(self, mean_normal):
         if self.R_fixed is not None:
@@ -621,7 +621,7 @@ class PatchWarper:
     def warp_patch(self, rgb_patch, x, y, mean_normal):
         R = self.get_rotation(mean_normal)
         crop_region = calculate_crop_region(rgb_patch, black_thresh=10, convex_fit=True)
-        warped_dims, H_final = self.get_warping_params(x, y, R, crop_region)
+        warped_dims, H_final, raw_warped_dims = self.get_warping_params(x, y, R, crop_region)
         if H_final is None:
             print(f"H final is none!")
             return None, None 
@@ -635,7 +635,7 @@ class PatchWarper:
         )
 
         #warped_patch = upscale_edsr(warped_patch, scale=4)
-        return warped_patch, H_final
+        return warped_patch, H_final, raw_warped_dims
 
 def detect_features_and_unwarp(
     feature_detector,
@@ -740,8 +740,8 @@ def detect_features_and_unwarp(
 
     return unwarped_pred
 
-def get_feature_detector(feature_detector_name, image):
-    h, w = image.shape[:2]
+def get_feature_detector(feature_detector_name, dims):
+    w, h = dims 
     KEYPOINTS_PER_PATCH = int(np.cbrt(h*w))
     print(f"Keypoints per patch: {KEYPOINTS_PER_PATCH}")
     feature_detector = None
@@ -790,12 +790,12 @@ def detect_features_from_patches(rgb_img, normals, patch_warper, feature_detecto
             rgb_patch = rgb_img[y:y_end, x:x_end]
             normal_patch = normals[y:y_end, x:x_end]
             mean_normal = patch_mean_normal(normal_patch) 
-            warped_patch, H = patch_warper.warp_patch(rgb_patch, x, y, mean_normal)
+            warped_patch, H, raw_warped_dims = patch_warper.warp_patch(rgb_patch, x, y, mean_normal)
              
             # TODO: don't convert to grayscale? -> make this optional!! (BB) 
             #gray_warped_patch = cv2.cvtColor(warped_patch, cv2.COLOR_BGR2GRAY)
             warped_keypoints = []
-            feature_detector = get_feature_detector(feature_detector_name, warped_patch)
+            feature_detector = get_feature_detector(feature_detector_name, raw_warped_dims)
             detect_features_and_unwarp(
                 feature_detector,
                 warped_patch,
@@ -1075,10 +1075,10 @@ if __name__ == "__main__":
    
     h, w = rgb_image.shape[:2] 
     # Constants
-    PATCH_SIZE_FACTOR = 8 
+    PATCH_SIZE_FACTOR = 4 
     # Assumes square image. TODO: account for non square images...
     PATCH_SIZE = w // PATCH_SIZE_FACTOR # This should be 64
-    MAX_WARPED_DIM_MULTIPLIER = 3 
+    MAX_WARPED_DIM_MULTIPLIER = 10 
     BORDER_MODE = cv2.BORDER_CONSTANT 
         
     normals = get_normals(depth_image, K, device)
