@@ -742,7 +742,10 @@ def detect_features_and_unwarp(
 
 def get_feature_detector(feature_detector_name, dims):
     w, h = dims 
-    KEYPOINTS_PER_PATCH = int(np.cbrt(h*w))
+    print(f"area: {w*h}")
+    print(f"sqrt area: {int(np.sqrt(w*h))}")
+    #KEYPOINTS_PER_PATCH = int(np.cbrt(h*w))
+    KEYPOINTS_PER_PATCH = int(np.sqrt(h*w)/20)
     print(f"Keypoints per patch: {KEYPOINTS_PER_PATCH}")
     feature_detector = None
     if feature_detector_name == 'disk':
@@ -1085,7 +1088,7 @@ if __name__ == "__main__":
     patch_warper = PatchWarper(K, PATCH_SIZE, PATCH_SIZE_FACTOR, MAX_WARPED_DIM_MULTIPLIER, BORDER_MODE, args.fixed_pitch)
     keypoints, descriptors, patches = detect_features_from_patches(rgb_image, normals, patch_warper, args.feature_detector)
     MAX_KEYPOINTS = 2048
-    #keypoints, descriptors = filter_top_keypoints(keypoints, descriptors, MAX_KEYPOINTS)
+    #keypoints, descriptors = filter_top_keypoints(keypoints, descriptors, MAX_KEYPOINTS//2)
     save_data(keypoints, descriptors, rgb_tensor, depth_tensor, K, args.feature_detector, f"features_{args.data_prefix}.pt")
     print("\n--- Feature Extraction Summary ---")
     print(f"Total Keypoints Detected: {len(keypoints)}")
