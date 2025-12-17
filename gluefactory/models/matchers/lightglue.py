@@ -275,7 +275,6 @@ class SelfBlock(nn.Module):
         self,
         x: torch.Tensor,
         encoding: torch.Tensor,
-        depth_encoding: torch.Tensor,
         mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         qkv = self.Wqkv(x)
@@ -285,15 +284,6 @@ class SelfBlock(nn.Module):
         k = apply_cached_rotary_emb(encoding, k)
         context = self.inner_attn(q, k, v, mask=mask)
         message = self.out_proj(context.transpose(1, 2).flatten(start_dim=-2))
-
-        # Add depth information
-        depth_q = apply_cached_rotary_emb(depth_encoding, q)
-        depth_k = apply_cached_rotary_emb(depth_encoding, k)
-        depth_context = self.inner_attn(depth_q, depth_k, v, mask=mask)
-        depth_message = self.depth_out_proj(depth_context.transpose(1, 2).flatten(start_dim=-2))
-        # TODO: use a network to fuse this? don't use depth_out_proj? pros and cons?
-        message = message + depth_message
-
         return x + self.ffn(torch.cat([x, message], -1))
 
 def debug_attention_mask(sim: torch.Tensor, mask: torch.Tensor = None):
@@ -447,25 +437,23 @@ class TransformerLayer(nn.Module):
         desc1,
         encoding0,
         encoding1,
-        depth_encoding0, 
-        depth_encoding1,
         mask0: Optional[torch.Tensor] = None,
         mask1: Optional[torch.Tensor] = None,
     ):
         if mask0 is not None and mask1 is not None:
-            return self.masked_forward(desc0, desc1, encoding0, encoding1, depth_encoding0, depth_encoding1, mask0, mask1)
+            return self.masked_forward(desc0, desc1, encoding0, encoding1, mask0, mask1)
         else:
-            desc0 = self.self_attn(desc0, encoding0, depth_encoding0)
-            desc1 = self.self_attn(desc1, encoding1, depth_encoding1)
+            desc0 = self.self_attn(desc0, encoding0)
+            desc1 = self.self_attn(desc1, encoding1)
             return self.cross_attn(desc0, desc1)
 
     # This part is compiled and allows padding inputs
-    def masked_forward(self, desc0, desc1, encoding0, encoding1, depth_encoding0, depth_encoding1, mask0, mask1):
+    def masked_forward(self, desc0, desc1, encoding0, encoding1, mask0, mask1):
         mask = mask0 & mask1.transpose(-1, -2)
         mask0 = mask0 & mask0.transpose(-1, -2)
         mask1 = mask1 & mask1.transpose(-1, -2)
-        desc0 = self.self_attn(desc0, encoding0, depth_encoding0, mask0)
-        desc1 = self.self_attn(desc1, encoding1, depth_encoding1, mask1)
+        desc0 = self.self_attn(desc0, encoding0, mask0)
+        desc1 = self.self_attn(desc1, encoding1, mask1)
         return self.cross_attn(desc0, desc1, mask)
 
 
@@ -564,12 +552,7 @@ class LightGlue(nn.Module):
 
         head_dim = conf.descriptor_dim // conf.num_heads
         self.posenc = LearnableFourierPositionalEncoding(
-        #    3, head_dim, head_dim # This is if using fused keypoint + depth encoding
-            2, head_dim, head_dim
-        )
-
-        self.depthenc = LearnableFourierPositionalEncoding(
-            1, head_dim, head_dim
+            3, head_dim, head_dim 
         )
 
         h, n, d = conf.num_heads, conf.n_layers, conf.descriptor_dim
@@ -708,9 +691,6 @@ class LightGlue(nn.Module):
         encoding0 = self.posenc(kpts0)
         encoding1 = self.posenc(kpts1)
 
-        depth_encoding0 = self.depthenc(depth0)
-        depth_encoding1 = self.depthenc(depth1)
-
         # GNN + final_proj + assignment
         do_early_stop = self.conf.depth_confidence > 0 and not self.training
         do_point_pruning = self.conf.width_confidence > 0 and not self.training
@@ -732,14 +712,12 @@ class LightGlue(nn.Module):
                     desc1,
                     encoding0,
                     encoding1,
-                    depth_encoding0, 
-                    depth_encoding1,
                     mask0, 
                     mask1,
                     use_reentrant=False,  # Recommended by torch, default was True
                 )
             else:
-                desc0, desc1 = self.transformers[i](desc0, desc1, encoding0, encoding1, depth_encoding0, depth_encoding1, mask0, mask1)
+                desc0, desc1 = self.transformers[i](desc0, desc1, encoding0, encoding1, mask0, mask1)
             if self.training or i == self.conf.n_layers - 1:
                 all_desc0.append(desc0)
                 all_desc1.append(desc1)
