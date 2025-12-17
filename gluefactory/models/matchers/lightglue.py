@@ -26,12 +26,29 @@ iteration = 0
 #    else torch.cuda.amp.custom_fwd(cast_inputs=torch.float32)
 #)
 
-def merge_kpts_and_depth(kpts: torch.Tensor, depth: torch.Tensor):
-    # Concatenate along last dimension -> [B, N, 3]
-    kpts_with_depth = torch.cat([kpts, depth], dim=-1)
-    return kpts_with_depth
+def point3d(kpt, camera, depth):            
+    homogeneous_kpt = camera.image2cam(kpt)                                                          
+    point_3d = homogeneous_kpt * depth[..., None]                    
+    return point_3d
 
-#@AMP_CUSTOM_FWD_F32
+def normalize_points_3d(pts: torch.Tensor) -> torch.Tensor:                                             """                                                                                                  Normalize 3D points to [-1, 1] per dimension.                                                    
+    Args:                                                                                            
+        pts: [B, N, 3] tensor of points                                                                  
+    Returns:                                                                                         
+        Normalized points of same shape as input.                                                        """                                                                                                                                                                     
+    # Compute per-dimension range                                                             
+    pt_min = pts.min(dim=1).values  # [B, 3]        
+    pt_max = pts.max(dim=1).values  # [B, 3]                        
+    size = 1 + pt_max - pt_min      # [B, 3]                                                     
+    # Center points                                 
+    shift = size / 2                                       
+    pts_centered = pts - shift[:, None, :]                                                                                             
+    # Normalize per-dimension                                      
+    scale = size / 2                                                           
+    pts_normalized = pts_centered / scale[:, None, :]                                                                                                         
+    return pts_normalized  
+
+#@MP_CUSTOM_FWD_F32
 def normalize_keypoints(
     kpts: torch.Tensor, size: Optional[torch.Tensor] = None
 ) -> torch.Tensor:
@@ -624,24 +641,24 @@ class LightGlue(nn.Module):
             assert key in data, f"Missing key {key} in data"
         kpts0, kpts1 = data["keypoints0"], data["keypoints1"]
         depth0, depth1 = data["depth_keypoints0"], data["depth_keypoints1"]
+        camera0, camera1 = data['view0']['camera'], data['view1']['camera']
         self.overlap = data['overlap_0to1']
         self.percent_invalid_depth0 = 100.0 * (~torch.isfinite(depth0)).sum(dim=1) / depth0.size(1) 
         self.percent_invalid_depth1 = 100.0 * (~torch.isfinite(depth1)).sum(dim=1) / depth1.size(1) 
-        mask0 = valid_mask(depth0)
-        mask1 = valid_mask(depth1)
 
-        # Normalize depth coordinates 
-        depth0 = normalize_depths(depth0).clone()
-        depth1 = normalize_depths(depth1).clone()
-        # Add trailing dimenion of 1 for depth values
-        depth0 = depth0.unsqueeze(-1)
-        depth1 = depth1.unsqueeze(-1)
-        # Mark any depth nans as 0 so nans don't propogate during optimization. 
-        # Invalid depths are ignored later as masks are applied to attention calculation to zero out 
-        # contributions from keypoints with invalid depths
-        depth0 = depth0.nan_to_num(0)
-        depth1 = depth1.nan_to_num(0)
-
+        point3d0 = point3d(kpts0, camera0, depth0)
+        point3d1 = point3d(kpts1, camera1, depth1)
+        # TODO: limit far points before normalizing!!
+        # 20 m???
+        point3d0 = normalize_points_3d(point3d0).clone()                                                     
+        point3d1 = normalize_points_3d(point3d1).clone()
+        mask0 = valid_mask(point3d0)                                                        
+        mask1 = valid_mask(point3d1)     
+        # Mark any point3d nans as 0 so nans don't propogate during optimization.                                                       
+        # Invalid point3ds are ignored later as masks are applied to attention calculation to zero out                                 
+        # contributions from keypoints with invalid point3ds                                                                                     
+        point3d0 = point3d0.nan_to_num(0)                                      
+        point3d1 = point3d1.nan_to_num(0)     
         b, m, _ = kpts0.shape
         b, n, _ = kpts1.shape
         device = kpts0.device
@@ -649,28 +666,28 @@ class LightGlue(nn.Module):
             size0 = data["view0"].get("image_size")
             size1 = data["view1"].get("image_size")
 
-        kpts0 = normalize_keypoints(kpts0, size0).clone()
-        kpts1 = normalize_keypoints(kpts1, size1).clone()
+        #kpts0 = normalize_keypoints(kpts0, size0).clone()
+        #kpts1 = normalize_keypoints(kpts1, size1).clone()
 
-        if self.conf.add_scale_ori:
-            sc0, o0 = data["scales0"], data["oris0"]
-            sc1, o1 = data["scales1"], data["oris1"]
-            kpts0 = torch.cat(
-                [
-                    kpts0,
-                    sc0 if sc0.dim() == 3 else sc0[..., None],
-                    o0 if o0.dim() == 3 else o0[..., None],
-                ],
-                -1,
-            )
-            kpts1 = torch.cat(
-                [
-                    kpts1,
-                    sc1 if sc1.dim() == 3 else sc1[..., None],
-                    o1 if o1.dim() == 3 else o1[..., None],
-                ],
-                -1,
-            )
+        #if self.conf.add_scale_ori:
+        #    sc0, o0 = data["scales0"], data["oris0"]
+        #    sc1, o1 = data["scales1"], data["oris1"]
+        #    kpts0 = torch.cat(
+        #        [
+        #            kpts0,
+        #            sc0 if sc0.dim() == 3 else sc0[..., None],
+        #            o0 if o0.dim() == 3 else o0[..., None],
+        #        ],
+        #        -1,
+        #    )
+        #    kpts1 = torch.cat(
+        #        [
+        #            kpts1,
+        #            sc1 if sc1.dim() == 3 else sc1[..., None],
+        #            o1 if o1.dim() == 3 else o1[..., None],
+        #        ],
+        #        -1,
+        #    )
 
         desc0 = data["descriptors0"].contiguous()
         desc1 = data["descriptors1"].contiguous()
@@ -682,14 +699,9 @@ class LightGlue(nn.Module):
             desc1 = desc1.half()
         desc0 = self.input_proj(desc0)
         desc1 = self.input_proj(desc1)
-        # cache position + depth embeddings
-        #kpts_with_depth0 = merge_kpts_and_depth(kpts0, depth0)
-        #kpts_with_depth1 = merge_kpts_and_depth(kpts1, depth1)
-        #encoding0 = self.posenc(kpts_with_depth0)
-        #encoding1 = self.posenc(kpts_with_depth1)
-
-        encoding0 = self.posenc(kpts0)
-        encoding1 = self.posenc(kpts1)
+        # cache position 
+        encoding0 = self.posenc(point3d0)
+        encoding1 = self.posenc(point3d1)
 
         # GNN + final_proj + assignment
         do_early_stop = self.conf.depth_confidence > 0 and not self.training
