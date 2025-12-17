@@ -31,22 +31,50 @@ def point3d(kpt, camera, depth):
     point_3d = homogeneous_kpt * depth[..., None]                    
     return point_3d
 
-def normalize_points_3d(pts: torch.Tensor) -> torch.Tensor:                                             """                                                                                                  Normalize 3D points to [-1, 1] per dimension.                                                    
-    Args:                                                                                            
-        pts: [B, N, 3] tensor of points                                                                  
-    Returns:                                                                                         
-        Normalized points of same shape as input.                                                        """                                                                                                                                                                     
-    # Compute per-dimension range                                                             
-    pt_min = pts.min(dim=1).values  # [B, 3]        
-    pt_max = pts.max(dim=1).values  # [B, 3]                        
-    size = 1 + pt_max - pt_min      # [B, 3]                                                     
-    # Center points                                 
-    shift = size / 2                                       
-    pts_centered = pts - shift[:, None, :]                                                                                             
-    # Normalize per-dimension                                      
-    scale = size / 2                                                           
-    pts_normalized = pts_centered / scale[:, None, :]                                                                                                         
-    return pts_normalized  
+def normalize_points_3d(pts: torch.Tensor) -> torch.Tensor:
+    """
+    Normalize 3D points using centroid + isotropic scale (paper method).
+
+    Args:
+        pts: [B, N, 3] tensor of points
+
+    Returns:
+        Normalized points of same shape as input.
+    """
+    # Centroid (mean over points)
+    center = pts.mean(dim=1, keepdim=True)  # [B, 1, 3]
+
+    # Center points
+    pts_centered = pts - center
+
+    # Average distance to centroid (scalar per batch)
+    scale = torch.norm(pts_centered, dim=-1).mean(dim=1, keepdim=True)  # [B, 1]
+    scale = scale.clamp(min=1e-6)  # numerical stability
+
+    # Isotropic normalization
+    pts_normalized = pts_centered / scale[:, None, :]
+    return pts_normalized
+
+def filter_outliers(
+    pts: torch.Tensor,
+    n_sigma: float = 3.0
+) -> torch.Tensor:
+    """
+    Remove points further than n_sigma standard deviations from the centroid
+    after normalization.
+
+    Args:
+        pts: [B, N, 3] normalized points
+        n_sigma: threshold
+
+    Returns:
+        mask: [B, N] boolean mask (True = keep)
+    """
+    r = torch.norm(pts, dim=-1)            # [B, N]
+    mu = r.mean(dim=1, keepdim=True)
+    sigma = r.std(dim=1, keepdim=True).clamp(min=1e-6)
+    return r <= (mu + n_sigma * sigma)
+
 
 #@MP_CUSTOM_FWD_F32
 def normalize_keypoints(
@@ -648,15 +676,17 @@ class LightGlue(nn.Module):
 
         point3d0 = point3d(kpts0, camera0, depth0)
         point3d1 = point3d(kpts1, camera1, depth1)
-        # TODO: limit far points before normalizing!!
-        # 20 m???
-        point3d0 = normalize_points_3d(point3d0).clone()                                                     
+        point3d0 = normalize_points_3d(point3d0).clone()
         point3d1 = normalize_points_3d(point3d1).clone()
         mask0 = valid_mask(point3d0)                                                        
         mask1 = valid_mask(point3d1)     
-        # Mark any point3d nans as 0 so nans don't propogate during optimization.                                                       
-        # Invalid point3ds are ignored later as masks are applied to attention calculation to zero out                                 
-        # contributions from keypoints with invalid point3ds                                                                                     
+        filter_outliers = False
+        if filter_outliers:
+            mask0 = mask0 & filter_outliers(point3d0)
+            mask1 = mask1 & filter_outliers(point3d1)
+ 
+        # Mark any point3d nans as 0 so nans don't propogate during optimization. 
+        # Invalid point3ds are ignored later as masks are applied to attention calculation to zero out             # contributions from keypoints with invalid point3ds  
         point3d0 = point3d0.nan_to_num(0)                                      
         point3d1 = point3d1.nan_to_num(0)     
         b, m, _ = kpts0.shape
