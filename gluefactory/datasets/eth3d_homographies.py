@@ -119,10 +119,10 @@ def qvec2rotmat(qvec):
 class ETH3DHomographyDataset(BaseDataset):
     default_conf = {
         "data_dir": "ETH3D_undistorted",
-        "grayscale": True,
+        "grayscale": False,
         "downsize_factor": 8,
         "min_covisibility": 500,
-        #"batch_size": 1,
+        "batch_size": 1,
         "two_view": True,
         "min_overlap": 0.5,
         "max_overlap": 1.0,
@@ -292,7 +292,7 @@ class ETH3DHomographyDataset(BaseDataset):
         shutil.move(tmp_dir / zip_name.split(".")[0], data_dir)
 
     def get_dataset(self, split):
-        return ETH3DHomographyDataset(self.conf)
+        return self
 
 #    def _transform_keypoints(self, features, data):
 #        """Transform keypoints by a homography, threshold them,
@@ -351,7 +351,8 @@ class ETH3DHomographyDataset(BaseDataset):
 
         return depth_img
 
-    def _read_view(self, img, depth, H_conf, ps, left=False):
+    def _read_view(self, img_tensor, depth, H_conf, ps, left=False):
+        img = img_tensor.detach().cpu().permute(1, 2, 0).numpy()
         data = sample_homography(img, depth, H_conf, ps)
         # visualize these!!
         if left:
@@ -368,7 +369,6 @@ class ETH3DHomographyDataset(BaseDataset):
         #    features = self.feature_loader({k: [v] for k, v in data.items()})
         #    features = self._transform_keypoints(features, data)
         #    data["cache"] = features
-
         return data
 
     def __getitem__(self, idx):
@@ -409,6 +409,7 @@ class ETH3DHomographyDataset(BaseDataset):
 
         H = compute_homography(data0["coords"], data1["coords"], [1, 1])
 
+        size = img.shape[:2][::-1]
         outputs["original_image_size"] = np.array(size)
         outputs["H_0to1"] = H.astype(np.float32)
         outputs["idx"] = idx
