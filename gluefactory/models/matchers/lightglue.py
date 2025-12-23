@@ -11,6 +11,7 @@ from torch import nn
 from ...settings import DATA_PATH
 from ..utils.losses import NLLLoss
 from ..utils.metrics import matcher_metrics
+from ...geometry.depth import sample_depth 
 
 FLASH_AVAILABLE = hasattr(F, "scaled_dot_product_attention")
 
@@ -54,6 +55,10 @@ def normalize_points_3d(pts: torch.Tensor) -> torch.Tensor:
     # Isotropic normalization
     pts_normalized = pts_centered / scale[:, None, :]
     return pts_normalized
+
+def get_kp_depth(kp, depth):
+    d, valid = sample_depth(kp, depth)
+    return d
 
 def filter_outliers(
     pts: torch.Tensor,
@@ -668,9 +673,13 @@ class LightGlue(nn.Module):
         for key in self.required_data_keys:
             assert key in data, f"Missing key {key} in data"
         kpts0, kpts1 = data["keypoints0"], data["keypoints1"]
-        depth0, depth1 = data["depth_keypoints0"], data["depth_keypoints1"]
+        #depth0, depth1 = data["depth_keypoints0"], data["depth_keypoints1"]
+        # TODO: remove this
+        depth0 = get_kp_depth(kpts0, data['view0']['depth'])
+        depth1 = get_kp_depth(kpts1, data['view1']['depth'])
         camera0, camera1 = data['view0']['camera'], data['view1']['camera']
-        self.overlap = data['overlap_0to1']
+        # TODO: put this back
+        self.overlap = 1.0 #data['overlap_0to1']
         self.percent_invalid_depth0 = 100.0 * (~torch.isfinite(depth0)).sum(dim=1) / depth0.size(1) 
         self.percent_invalid_depth1 = 100.0 * (~torch.isfinite(depth1)).sum(dim=1) / depth1.size(1) 
 
