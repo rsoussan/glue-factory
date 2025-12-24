@@ -206,55 +206,19 @@ class ETH3DHomographyDataset(BaseDataset):
 
             # Extract the covisibility of each image
             num_imgs = len(names)
-            n_covisible_points = np.zeros((num_imgs, num_imgs))
             for i in range(num_imgs - 1):
-                for j in range(i + 1, num_imgs):
-                    visible_points3D1 = image_visible_points3D[names[i]]
-                    visible_points3D2 = image_visible_points3D[names[j]]
-                    n_covisible_points[i, j] = len(
-                        visible_points3D1 & visible_points3D2
-                    )
-
-            # Keep only the pairs with enough covisibility
-            valid_pairs = np.where(n_covisible_points >= conf.min_covisibility)
-            valid_pairs = np.stack(valid_pairs, axis=1)
-
-            self.data += [
-                {
-                    "view0": {
-                        "name": names[i][:-4],
-                        "img_path": str(Path(img_folder, names[i])),
-                        "depth_path": str(Path(depth_folder, names[i][:-4]))
-                        + depth_ext,
-                        "camera": cameras[name_to_cam_idx[names[i]]["dist_camera_idx"]],
-                        "T_w2cam": Pose.from_4x4mat(T_world_to_camera[names[i]]),
-                    },
-                    "view1": {
-                        "name": names[j][:-4],
-                        "img_path": str(Path(img_folder, names[j])),
-                        "depth_path": str(Path(depth_folder, names[j][:-4]))
-                        + depth_ext,
-                        "camera": cameras[name_to_cam_idx[names[j]]["dist_camera_idx"]],
-                        "T_w2cam": Pose.from_4x4mat(T_world_to_camera[names[j]]),
-                    },
-                    "T_world_to_ref": Pose.from_4x4mat(T_world_to_camera[names[i]]),
-                    "T_world_to_target": Pose.from_4x4mat(T_world_to_camera[names[j]]),
-                    "T_0to1": Pose.from_4x4mat(
-                        np.float32(
-                            T_world_to_camera[names[j]]
-                            @ np.linalg.inv(T_world_to_camera[names[i]])
-                        )
-                    ),
-                    "T_1to0": Pose.from_4x4mat(
-                        np.float32(
-                            T_world_to_camera[names[i]]
-                            @ np.linalg.inv(T_world_to_camera[names[j]])
-                        )
-                    ),
-                    "n_covisible_points": n_covisible_points[i, j],
-                }
-                for (i, j) in valid_pairs
-            ]
+                self.data += [
+                    {
+                        "view0": {
+                            "name": names[i][:-4],
+                            "img_path": str(Path(img_folder, names[i])),
+                            "depth_path": str(Path(depth_folder, names[i][:-4]))
+                            + depth_ext,
+                            "camera": cameras[name_to_cam_idx[names[i]]["dist_camera_idx"]],
+                            "T_w2cam": Pose.from_4x4mat(T_world_to_camera[names[i]]),
+                        }
+                    }
+                ]
 
         # Homography info 
         aug_conf = conf.photometric
@@ -351,7 +315,7 @@ class ETH3DHomographyDataset(BaseDataset):
 
         return depth_img
 
-    def _read_view(self, img_tensor, depth, H_conf, ps, left=False):
+    def _read_view(self, img_tensor, depth, view, H_conf, ps, left=False):
         img = img_tensor.detach().cpu().permute(1, 2, 0).numpy()
         data = sample_homography(img, depth, H_conf, ps)
         # visualize these!!
@@ -369,6 +333,7 @@ class ETH3DHomographyDataset(BaseDataset):
         #    features = self.feature_loader({k: [v] for k, v in data.items()})
         #    features = self._transform_keypoints(features, data)
         #    data["cache"] = features
+        data["camera"] = view["camera"]
         return data
 
     def __getitem__(self, idx):
@@ -377,21 +342,15 @@ class ETH3DHomographyDataset(BaseDataset):
         data = self.data[idx]
         # Load the images
         view0 = data.pop("view0")
-        view1 = data.pop("view1")
         view0 = {**view0, **self._read_image(view0["img_path"])}
-        view1 = {**view1, **self._read_image(view1["img_path"])}
         view0["scales"] = np.array([1.0, 1]).astype(np.float32)
-        view1["scales"] = np.array([1.0, 1]).astype(np.float32)
 
         # Load the depths
         view0["depth"] = self.read_depth(view0["depth_path"])
-        view1["depth"] = self.read_depth(view1["depth_path"])
 
         outputs = {
             **data,
             "view0": view0,
-            "view1": view1,
-            "name": f"{view0['name']}_{view1['name']}",
         }
 
         # Homography
@@ -404,17 +363,15 @@ class ETH3DHomographyDataset(BaseDataset):
         # Only use view0 image
         img = view0["image"]
         depth = view0["depth"]
-        data0 = self._read_view(img, depth, left_conf, ps, left=True)
-        data1 = self._read_view(img, depth, self.conf.homography, ps, left=False)
-
+        data0 = self._read_view(img, depth, view0, left_conf, ps, left=True)
+        data1 = self._read_view(img, depth, view0, self.conf.homography, ps, left=False)
         H = compute_homography(data0["coords"], data1["coords"], [1, 1])
-
         size = img.shape[:2][::-1]
         outputs["original_image_size"] = np.array(size)
         outputs["H_0to1"] = H.astype(np.float32)
         outputs["idx"] = idx
-        outputs["view0"] = view0 
-        outputs["view1"] = view1 
+        outputs["view0"] = data0 
+        outputs["view1"] = data1 
         return outputs
 
     def __len__(self):

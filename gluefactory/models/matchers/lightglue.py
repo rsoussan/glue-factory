@@ -127,6 +127,18 @@ def normalize_depths(depths: torch.Tensor) -> torch.Tensor:
     normalized_depths = (depths - shift) / (depth_range / 2)
     return normalized_depths
 
+def valid_mask3d(x: torch.Tensor) -> torch.BoolTensor:
+    # TODO: optional check for >= 0!
+    # TODO: check z behind camera!
+    mask_1d = torch.isfinite(x).all(dim=-1) if x.dim() == 3 else torch.isfinite(x) # (batch, num)
+    mask_2d = mask_1d.unsqueeze(2) & mask_1d.unsqueeze(1)  # (batch, num, num)
+    # Expand mask for num_heads as expected in transformer layer
+    mask_2d = mask_2d.unsqueeze(1)
+    #print("Fully masked rows detected!" if (~torch.isfinite(mask_2d)).all(dim=-1).any() else "All mask rows OK")
+    #if (~mask_2d).all(dim=-1).any(): print("Valid mask: Some rows are fully masked")
+    return mask_2d
+
+
 def valid_mask(depth: torch.Tensor) -> torch.BoolTensor:
     mask_1d = torch.isfinite(depth) & (depth != 0.0)  # (batch, num)
     mask_2d = mask_1d.unsqueeze(2) & mask_1d.unsqueeze(1)  # (batch, num, num)
@@ -313,7 +325,6 @@ class SelfBlock(nn.Module):
         self.Wqkv = nn.Linear(embed_dim, 3 * embed_dim, bias=bias)
         self.inner_attn = Attention(flash)
         self.out_proj = nn.Linear(embed_dim, embed_dim, bias=bias)
-        self.depth_out_proj = nn.Linear(embed_dim, embed_dim, bias=bias)
         self.ffn = nn.Sequential(
             nn.Linear(2 * embed_dim, 2 * embed_dim),
             nn.LayerNorm(2 * embed_dim, elementwise_affine=True),
@@ -687,8 +698,9 @@ class LightGlue(nn.Module):
         point3d1 = point3d(kpts1, camera1, depth1)
         point3d0 = normalize_points_3d(point3d0).clone()
         point3d1 = normalize_points_3d(point3d1).clone()
-        mask0 = valid_mask(point3d0)                                                        
-        mask1 = valid_mask(point3d1)     
+        print(f"point3d0 shape: {point3d0.shape}, depth0 shape: {depth0.shape}")
+        mask0 = valid_mask(depth0) & valid_mask3d(point3d0)                                                        
+        mask1 = valid_mask(depth1) & valid_mask3d(point3d1)                                                        
         filter_outliers = False
         if filter_outliers:
             mask0 = mask0 & filter_outliers(point3d0)
@@ -899,7 +911,8 @@ class LightGlue(nn.Module):
         # If these metrics are the same for each gpu distribution, log them instead in the train.py script.
         losses["percent_invalid_depth0"] = self.percent_invalid_depth0 #torch.tensor(self.percent_invalid_depth0, device=pred['ref_descriptors0'].device, dtype=torch.float32)
         losses["percent_invalid_depth1"] = self.percent_invalid_depth1 #torch.tensor(self.percent_invalid_depth1, device=pred['ref_descriptors0'].device, dtype=torch.float32)
-        losses["overlap"] = self.overlap #torch.tensor(self.percent_invalid_depth1, device=pred['ref_descriptors0'].device, dtype=torch.float32)
+        # TODO: put this back
+        #losses["overlap"] = self.overlap #torch.tensor(self.percent_invalid_depth1, device=pred['ref_descriptors0'].device, dtype=torch.float32)
         #print(f"Loss Computed nll: {torch.cuda.memory_allocated() / 1024**3:.2f} GB")
         # B = pred['log_assignment'].shape[0]
         losses["row_norm"] = pred["log_assignment"].exp()[:, :-1].sum(2).mean(1)
